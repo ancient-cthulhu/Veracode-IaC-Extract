@@ -1,7 +1,7 @@
 # Veracode IaC / Container / Secrets Findings Extract
 
 Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON
-or JSONL, with filters so each team gets only what it owns.
+or JSONL, with filters.
 
 ## Setup
 
@@ -175,78 +175,6 @@ matches an application profile.
 
 Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON
 or JSONL, with filters so each team gets only what it owns.
-
-## Setup
-
-```bash
-pip install requests veracode-api-signing veracode-api-py
-```
-
-Uses your normal Veracode API credentials (`~/.veracode/credentials` or the
-`VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET` environment variables). The account
-needs the Reviewer role.
-
-## Quick start
-
-```bash
-python veracode_iac_extract.py                    # everything -> veracode_iac_findings.csv
-python veracode_iac_extract.py --compact          # same, short developer view
-python veracode_iac_extract.py --list-scans       # what has been scanned, no findings
-```
-
-## Common requests
-
-**One repo, or every repo in an org**
-```bash
-python veracode_iac_extract.py --asset "my-org/payments-api"
-python veracode_iac_extract.py --asset "my-org/*"
-python veracode_iac_extract.py --asset "my-org/payments-*,my-org/billing-*"
-python veracode_iac_extract.py --asset "my-org/*" --exclude-asset "sandbox,archived"
-```
-
-**Only container images, or only IaC**
-```bash
-python veracode_iac_extract.py --scan-type container
-python veracode_iac_extract.py --scan-type iac
-python veracode_iac_extract.py --asset-type image --asset "registry.acme.com/*"
-```
-
-**What a dev team should fix first**
-```bash
-python veracode_iac_extract.py --severity high+ --fixable --compact
-python veracode_iac_extract.py --scan-type container --cvss 9 --fixable
-```
-
-**Terraform / Kubernetes / Dockerfile misconfigurations**
-```bash
-python veracode_iac_extract.py --type misconfiguration --file "*.tf"
-python veracode_iac_extract.py --type misconfiguration --file "Dockerfile,*.yaml,*.yml"
-```
-
-**Leaked secrets**
-```bash
-python veracode_iac_extract.py --type secret
-python veracode_iac_extract.py --type secret --since 30d
-```
-
-**"Are we affected by this CVE / this library?"**
-```bash
-python veracode_iac_extract.py --id CVE-2024-3094
-python veracode_iac_extract.py --library openssl
-python veracode_iac_extract.py --library "log4j*" --severity critical,high
-```
-
-**Recent activity, or one person's scans**
-```bash
-python veracode_iac_extract.py --since 7d
-python veracode_iac_extract.py --since 2026-09-01 --until 2026-09-30
-python veracode_iac_extract.py --scanned-by ci_pipeline_user
-```
-
-**Management rollup**
-```bash
-python veracode_iac_extract.py --summary-csv per_asset.csv
-```
 
 **Other formats**
 
