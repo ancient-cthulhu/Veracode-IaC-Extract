@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -219,7 +220,7 @@ def mint_principal_token() -> str:
 
 def make_session(ca_cert: Optional[str]) -> requests.Session:
     s = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=50, max_retries=0)
+    adapter = HTTPAdapter(pool_connections=20, pool_maxsize=50, max_retries=0)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     if ca_cert:
