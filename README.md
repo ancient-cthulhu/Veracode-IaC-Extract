@@ -36,6 +36,7 @@ python veracode_iac_extract.py --asset "my-org/*" --exclude-asset "sandbox,archi
 python veracode_iac_extract.py --scan-type container
 python veracode_iac_extract.py --scan-type iac
 python veracode_iac_extract.py --asset-type image --asset "registry.acme.com/*"
+python veracode_iac_extract.py --asset-type repo,directory
 ```
 
 **What a dev team should fix first**
@@ -61,6 +62,12 @@ python veracode_iac_extract.py --type secret --since 30d
 python veracode_iac_extract.py --id CVE-2024-3094
 python veracode_iac_extract.py --library openssl
 python veracode_iac_extract.py --library "log4j*" --severity critical,high
+```
+
+**Scans that failed policy**
+```bash
+python veracode_iac_extract.py --policy failed
+python veracode_iac_extract.py --policy failed --list-scans -o failed_scans.csv
 ```
 
 **Recent activity, or one person's scans**
@@ -103,7 +110,8 @@ Never case-sensitive. Using several flags together means **and**.
 | `--asset` | `"my-org/*"` | Asset name, asset ID or source |
 | `--exclude-asset` | `sandbox` | Leave these out |
 | `--scan-type` | `container` | `container` or `iac` |
-| `--asset-type` | `image` | e.g. `image`, `repository`, `directory` |
+| `--asset-type` | `image` | `image`, `repo`, `archive`, `directory` |
+| `--policy` | `failed` | `failed`, `passed`, `not-assessed` |
 | `--scanned-by` | `ci_user` | User that ran the scan |
 | `--since` / `--until` | `30d`, `2026-09-01` | Scan date. Relative: `12h`, `30d`, `2w` |
 | `--latest-only` | | Only the newest scan per asset |
@@ -163,18 +171,98 @@ Pick your own with `--columns "Asset Name,Severity,Title,Location"`. Add
 matches an application profile.
 
 ## API load
+# Veracode IaC / Container / Secrets Findings Extract
 
-- One request lists every scan. Asset, scan type and date filters are applied to that list,
-  so only matching scans are queried for findings.
+Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON
+or JSONL, with filters so each team gets only what it owns.
+
+## Setup
+
+```bash
+pip install requests veracode-api-signing veracode-api-py
+```
+
+Uses your normal Veracode API credentials (`~/.veracode/credentials` or the
+`VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET` environment variables). The account
+needs the Reviewer role.
+
+## Quick start
+
+```bash
+python veracode_iac_extract.py                    # everything -> veracode_iac_findings.csv
+python veracode_iac_extract.py --compact          # same, short developer view
+python veracode_iac_extract.py --list-scans       # what has been scanned, no findings
+```
+
+## Common requests
+
+**One repo, or every repo in an org**
+```bash
+python veracode_iac_extract.py --asset "my-org/payments-api"
+python veracode_iac_extract.py --asset "my-org/*"
+python veracode_iac_extract.py --asset "my-org/payments-*,my-org/billing-*"
+python veracode_iac_extract.py --asset "my-org/*" --exclude-asset "sandbox,archived"
+```
+
+**Only container images, or only IaC**
+```bash
+python veracode_iac_extract.py --scan-type container
+python veracode_iac_extract.py --scan-type iac
+python veracode_iac_extract.py --asset-type image --asset "registry.acme.com/*"
+```
+
+**What a dev team should fix first**
+```bash
+python veracode_iac_extract.py --severity high+ --fixable --compact
+python veracode_iac_extract.py --scan-type container --cvss 9 --fixable
+```
+
+**Terraform / Kubernetes / Dockerfile misconfigurations**
+```bash
+python veracode_iac_extract.py --type misconfiguration --file "*.tf"
+python veracode_iac_extract.py --type misconfiguration --file "Dockerfile,*.yaml,*.yml"
+```
+
+**Leaked secrets**
+```bash
+python veracode_iac_extract.py --type secret
+python veracode_iac_extract.py --type secret --since 30d
+```
+
+**"Are we affected by this CVE / this library?"**
+```bash
+python veracode_iac_extract.py --id CVE-2024-3094
+python veracode_iac_extract.py --library openssl
+python veracode_iac_extract.py --library "log4j*" --severity critical,high
+```
+
+**Recent activity, or one person's scans**
+```bash
+python veracode_iac_extract.py --since 7d
+python veracode_iac_extract.py --since 2026-09-01 --until 2026-09-30
+python veracode_iac_extract.py --scanned-by ci_pipeline_user
+```
+
+**Management rollup**
+```bash
+python veracode_iac_extract.py --summary-csv per_asset.csv
+```
+
+**Other formats**
+
+- `--asset` is filtered **server side**. `--asset "my-org/*"` only downloads scans matching `my-org/`, not the whole tenant.
+- Scan type, asset type, date and policy filters are applied to that scan list before any
+  findings are requested, so only matching scans are queried.
 - Scans whose severity totals show nothing relevant are skipped without a request. With
   `--severity critical`, a scan with zero criticals is never fetched.
 - Requests are capped at 2 per second across 4 workers. On a 429 every worker pauses and
   the server's `Retry-After` is honoured.
 
 Tune with `--rps` and `--max-workers`. Use `--ca-cert corp.pem` behind SSL inspection.
+`--no-server-search` downloads the full scan list and filters `--asset` locally instead.
 
 Finding-level filters (`--type`, `--id`, `--library`, `--file`, ...) are applied after
-download, because this API has no documented filter parameters.
+download.
 
 ## Exit codes
 
