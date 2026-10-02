@@ -114,6 +114,7 @@ BASE_COLUMNS = [
 # Always kept even if empty across the export.
 CORE_COLUMNS = {"Asset Name", "Severity", "Finding Type", "Finding ID", "Title",
                 "File Path", "Scan ID", "Scan Date"}
+POLICY_VALUES = {"failed": "error", "passed": "success", "not-assessed": "default"}
 COMPACT_COLUMNS = ["Asset Name", "Severity", "CVSS", "Finding Type", "Finding ID", "Title",
                    "Library", "Fixed Versions", "Location", "Suggested Fix", "Scan Date", "Veracode Link"]
 SCAN_INVENTORY_COLUMNS = [
@@ -299,6 +300,7 @@ class Client:
     def paginate(self, url: str, key: str, scope: str,
                  extra: Optional[dict[str, Any]] = None) -> list[dict]:
         out: list[dict] = []
+        expected: Any = None
         prev: Optional[list] = None
         page = 0
         while True:
@@ -314,6 +316,7 @@ class Client:
             out.extend(batch)
             prev = batch
             total_pages = (data.get("pagination") or {}).get("total_pages")
+            expected = (data.get("pagination") or {}).get("total_elements")
             if isinstance(total_pages, (int, float)):
                 if page >= int(total_pages) - 1:
                     break
@@ -325,6 +328,8 @@ class Client:
             if page >= MAX_PAGES:
                 self.tracker.fail(scope, f"hit {MAX_PAGES}-page safety cap; result may be incomplete")
                 break
+        if isinstance(expected, int) and len(out) < expected:
+            self.tracker.fail(scope, f"API reported {expected} records but only {len(out)} were returned")
         return out
 
 
@@ -438,7 +443,8 @@ class Clause:
         self.key = norm(column)
         self.negate = negate
         self.source = source or f"{column}{'!=' if negate else '='}{patterns}"
-        self.matchers = [compile_pattern(p) for p in split_patterns(patterns)]
+        self.patterns = split_patterns(patterns)
+        self.matchers = [compile_pattern(p) for p in self.patterns]
         self.resolved = False
         if not self.matchers:
             raise ValueError(f"Filter '{self.source}' has no pattern")
@@ -705,8 +711,9 @@ examples:
                    help="Asset to include. Matches asset name, asset ID or source.")
     g.add_argument("--exclude-asset", action="append", metavar="PATTERN", help="Asset to exclude.")
     g.add_argument("--scan-type", action="append", metavar="LIST", help="e.g. container, iac")
-    g.add_argument("--asset-type", action="append", metavar="LIST", help="e.g. image, repository, directory")
+    g.add_argument("--asset-type", action="append", metavar="LIST", help="image, repo, archive, directory")
     g.add_argument("--scanned-by", action="append", metavar="PATTERN", help="User that ran the scan.")
+    g.add_argument("--policy", choices=list(POLICY_VALUES), help="Scan policy result.")
     g.add_argument("--scan-id", action="append", metavar="PATTERN")
     g.add_argument("--since", metavar="DATE|Nd", help="Only scans on/after this (YYYY-MM-DD, 30d, 12h, 2w).")
     g.add_argument("--until", metavar="DATE|Nd", help="Only scans on/before this.")
@@ -758,6 +765,9 @@ examples:
     g = p.add_argument_group("connection")
     g.add_argument("--max-workers", type=int, default=4)
     g.add_argument("--rps", type=float, default=2.0, help="Max requests per second (default 2).")
+    g.add_argument("--no-server-search", action="store_true",
+                   help="Download the full scan list and filter --asset locally instead of "
+                        "using the API search.")
     g.add_argument("--fetch-empty-scans", action="store_true",
                    help="Also query scans whose severity totals say they have no matching findings.")
     g.add_argument("--max-attempts", type=int, default=6)
@@ -787,6 +797,28 @@ def parse_severities(values: Optional[list[str]], minimum: Optional[str]) -> Opt
     return allowed
 
 
+def server_search_terms(clauses: list[Clause]) -> Optional[list[str]]:
+    """Turn the first --asset filter into text for the API's own `search` parameter.
+
+    The API search is plain text, so a wildcard pattern contributes its longest
+    literal piece ("my-org/pay*" -> "my-org/pay"). The full pattern is still
+    applied locally afterwards. Returns None when the list must be fetched whole.
+    """
+    for c in clauses:
+        if c.column == "Asset Name" and c.also and not c.negate:
+            terms: list[str] = []
+            for pat in c.patterns:
+                if pat.lower().startswith("re:"):
+                    return None
+                best = max((x for x in re.split(r"[*?]+", pat) if x), key=len, default="")
+                if len(best) < 3:
+                    return None
+                if best.lower() not in (t.lower() for t in terms):
+                    terms.append(best)
+            return terms or None
+    return None
+
+
 def build_clauses(args: argparse.Namespace) -> list[Clause]:
     clauses: list[Clause] = []
 
@@ -801,6 +833,8 @@ def build_clauses(args: argparse.Namespace) -> list[Clause]:
     add("Scan Type", args.scan_type)
     add("Asset Type", args.asset_type)
     add("Scanned By", args.scanned_by)
+    if args.policy:
+        clauses.append(Clause("Scan Policy Status", f"re:^{POLICY_VALUES[args.policy]}$"))
     for v in args.library or []:
         clauses.append(Clause("Library Name", v, also=("Library",)))
     add("Category", args.category)
@@ -861,12 +895,28 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
 
     # --- 1. Scan inventory ---------------------------------------------------
     print("Fetching scan list...")
+    terms = None if args.no_server_search else server_search_terms(clauses)
     try:
-        scans = client.paginate(f"{client.base}/scans", "records", "scans")
+        scans: list[dict] = []
+        if terms:
+            seen_ids: set[str] = set()
+            for term in terms:
+                hits = client.paginate(f"{client.base}/scans", "records", f"scans[search={term}]",
+                                       {"search": term})
+                print(f"  server-side search '{term}': {len(hits)} scans")
+                for h in hits:
+                    if str(h.get("scan_id")) not in seen_ids:
+                        seen_ids.add(str(h.get("scan_id")))
+                        scans.append(h)
+            if not scans:
+                print("  no server-side matches, falling back to the full scan list")
+                terms = None
+        if not terms:
+            scans = client.paginate(f"{client.base}/scans", "records", "scans")
+            print(f"  {len(scans)} scans in tenant")
     except FetchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"  {len(scans)} scans in tenant")
 
     latest = latest_scan_ids(scans)
     app_index = load_app_index(args.ca_cert, tracker) if args.match_apps else {}
