@@ -14,6 +14,7 @@ import datetime as dt
 import fnmatch
 import hashlib
 import html
+import io
 import json
 import os
 import random
@@ -682,6 +683,242 @@ def order_columns(seen: Counter, base: list[str], keep_empty: bool, user_cols: O
 
 
 # ---------------------------------------------------------------------------
+# Mitigations (only with --mitigations or --check-mitigations)
+# ---------------------------------------------------------------------------
+# Mitigations for these findings are not yet available on the Veracode Platform.
+# Until they are, they are tracked in the export CSV itself: people fill in the
+# Mitigation columns, and the next run carries them onto the fresh findings by key.
+
+MITIGATION_TYPES = {
+    "false-positive": "Not a real issue (Potential False Positive in Static Analysis).",
+    "by-design": "Deliberate and approved, or the design already handles it (Mitigate by Design).",
+    "network-environment": "A network control handles it: WAF, security group, private network.",
+    "os-environment": "The OS or runtime handles it: hardened host, read-only file system, no shell.",
+    "accept-risk": "The business accepts the risk for a limited time. Needs Mitigation Expires.",
+}
+# Columns people fill in. Status and Key are written by the script.
+MITIGATION_INPUT = ["Mitigation Type", "Mitigation Reason", "Mitigation Approved By", "Mitigation Expires",
+                    "Mitigation Notes"]
+MITIGATION_COLUMNS = ["Mitigation Status"] + MITIGATION_INPUT + ["Mitigation Key"]
+NOT_IN_EXPORT = "Not in export"
+EXPIRY_WARN_DAYS = 30
+_RE_DIGEST = re.compile(r"@sha256:[0-9a-f]{16,}$", re.I)
+_RE_LINE_NO = re.compile(r"^\s*\d+\s*[:|]?\s?", re.M)
+_RE_MKEY = re.compile(r"^mk-[0-9a-f]{12}$")
+
+
+def stable_asset(name: Any, asset_type: Any) -> str:
+    """Lower-case asset name. Images lose their tag and digest, so app:1.2 and app:1.3 match."""
+    a = str(name or "").strip()
+    if str(asset_type or "").strip().lower() == "image":
+        a = _RE_DIGEST.sub("", a)
+        head, sep, last = a.rpartition("/")
+        a = head + sep + last.split(":", 1)[0]
+    return a.lower()
+
+
+def stable_path(path: Any) -> str:
+    p = str(path or "").strip().replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p.lstrip("/")
+
+
+def code_hash(code: Any) -> str:
+    """Hash of the flagged code without whitespace or line numbers. The code itself is never stored."""
+    if code in (None, "", [], {}):
+        return ""
+    parts: list[str] = []
+
+    def collect(v: Any) -> None:
+        if isinstance(v, str):
+            parts.append(v)
+        elif isinstance(v, list):
+            for x in v:
+                collect(x)
+        elif isinstance(v, dict):
+            for k in sorted(v):
+                collect(v[k])
+
+    value: Any = code
+    if isinstance(code, str):
+        try:
+            value = json.loads(code)
+        except ValueError:
+            value = _RE_LINE_NO.sub("", code)
+    collect(value)
+    compact = re.sub(r"\s+", "", "".join(parts))
+    return hashlib.sha256(compact.encode()).hexdigest()[:16] if compact else ""
+
+
+def mitigation_key(row: dict[str, Any]) -> str:
+    """ID that stays the same between scans: no line numbers, no image tags.
+    The mk- prefix stops spreadsheets from turning it into a number."""
+    ftype = str(row.get("Finding Type") or "").strip().lower()
+    low = lambda col: str(row.get(col) or "").strip().lower()  # noqa: E731
+    path = stable_path(row.get("File Path"))
+    parts = ["v1", stable_asset(row.get("Asset Name"), row.get("Asset Type")), ftype, low("Finding ID")]
+    if ftype == "misconfiguration":
+        parts += [low("Rule ID"), path, low("Resource")]
+    elif ftype == "secret":
+        parts += [low("Rule ID"), path, code_hash(row.get("Code Lines"))]
+    elif ftype == "vulnerability":
+        parts += [low("Library Name"), path]
+    else:
+        parts += [low("Rule ID"), path, low("Resource"), low("Library Name")]
+    return "mk-" + hashlib.sha256("\x1f".join(parts).encode()).hexdigest()[:12]
+
+
+def parse_expiry(text: str) -> tuple[Optional[dt.date], str]:
+    """YYYY-MM-DD, or a date a spreadsheet rewrote (31/12/2027, 12/31/2027) when it is unambiguous."""
+    t = text.strip()
+    m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[ T].*)?", t)
+    if m:
+        y, mo, d = map(int, m.groups())
+    else:
+        m = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?: .*)?", t)
+        if not m:
+            return None, f"'{t}' is not a date. Use YYYY-MM-DD"
+        a, b, y = map(int, m.groups())
+        if a > 12 and b <= 12:
+            d, mo = a, b
+        elif b > 12 and a <= 12:
+            mo, d = a, b
+        elif a == b:
+            d = mo = a
+        else:
+            return None, f"'{t}' could be day/month or month/day. Use YYYY-MM-DD"
+    try:
+        return dt.date(y, mo, d), ""
+    except ValueError:
+        return None, f"'{t}' is not a valid date"
+
+
+def read_csv_file(path: str) -> list[dict[str, str]]:
+    """Reads a CSV saved by this script or by Excel: UTF-8 or Windows encoding, comma or semicolon."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    first = text.split("\n", 1)[0]
+    delim = ";" if first.count(";") > first.count(",") else ","
+    rows = []
+    for r in csv.DictReader(io.StringIO(text, newline=""), delimiter=delim):
+        rows.append({k: (v[1:] if isinstance(v, str) and len(v) > 1 and v[0] == "'" and v[1] in "=+-@\t\r"
+                         else (v or "")) for k, v in r.items() if k is not None})
+    return rows
+
+
+def load_mitigations(path: str, today: dt.date) -> tuple[dict[str, dict], dict[str, dict], list[str], list[str]]:
+    """Reads the Mitigation columns of a previous export.
+    Returns (mitigation per key, the row each came from, errors, notes). A missing file is not an error."""
+    if not os.path.exists(path):
+        return {}, {}, [], [f"{path} did not exist yet, so every finding is Open. "
+                            "Fill in the Mitigation columns to mitigate."]
+    try:
+        rows = read_csv_file(path)
+    except (OSError, csv.Error) as exc:
+        return {}, {}, [f"cannot read {path}: {exc}"], []
+    if rows and "Mitigation Key" not in rows[0]:
+        return {}, {}, [f"{path} has no Mitigation Key column. Use a CSV written with --mitigations"], []
+    by_key: dict[str, dict] = {}
+    source: dict[str, dict] = {}
+    line_of: dict[str, int] = {}
+    errors: list[str] = []
+    notes: list[str] = []
+    for line, row in enumerate(rows, 2):
+        vals = {c: str(row.get(c) or "").strip() for c in MITIGATION_INPUT}
+        if not any(vals.values()):
+            continue
+        where = f"line {line} ({row.get('Finding ID') or row.get('Mitigation Key') or '?'})"
+        key = str(row.get("Mitigation Key") or "").strip()
+        problems = []
+        if not _RE_MKEY.match(key):
+            problems.append("Mitigation Key is missing or changed. Do not edit it")
+        mtype = vals["Mitigation Type"].lower()
+        if not mtype:
+            problems.append("set Mitigation Type, or clear the other Mitigation columns")
+        elif mtype not in MITIGATION_TYPES:
+            problems.append(f"Mitigation Type must be one of {', '.join(MITIGATION_TYPES)}")
+        for col in ("Mitigation Reason", "Mitigation Approved By"):
+            if not vals[col]:
+                problems.append(f"{col} is required")
+        expires = None
+        if vals["Mitigation Expires"]:
+            expires, err = parse_expiry(vals["Mitigation Expires"])
+            if err:
+                problems.append(f"Mitigation Expires: {err}")
+        elif mtype == "accept-risk":
+            problems.append("accept-risk needs Mitigation Expires")
+        if problems:
+            errors += [f"{where}: {p}" for p in problems]
+            continue
+        mit = {"Mitigation Type": mtype, "Mitigation Reason": vals["Mitigation Reason"],
+               "Mitigation Approved By": vals["Mitigation Approved By"],
+               "Mitigation Expires": expires.isoformat() if expires else "",
+               "Mitigation Notes": vals["Mitigation Notes"], "_expires": expires}
+        if key in by_key:
+            if {k: v for k, v in by_key[key].items() if not k.startswith("_")} != \
+                    {k: v for k, v in mit.items() if not k.startswith("_")}:
+                errors.append(f"{where}: same Mitigation Key as line {line_of[key]} but a different mitigation. "
+                              "Make them match or clear one")
+            continue
+        by_key[key], source[key], line_of[key] = mit, row, line
+        if expires and expires < today:
+            notes.append(f"{where} expired on {expires}: the finding is open again. Renew or fix it")
+        elif expires and (expires - today).days <= EXPIRY_WARN_DAYS:
+            notes.append(f"{where} expires on {expires}")
+    return by_key, source, errors, notes
+
+
+class MitigationSet:
+    def __init__(self, by_key: dict[str, dict], source: dict[str, dict], today: dt.date) -> None:
+        self.by_key = by_key
+        self.source = source
+        self.today = today
+        self.seen: set[str] = set()
+
+    def apply(self, row: dict[str, Any]) -> str:
+        """Adds the Mitigation columns to a fresh finding. Returns Open, Mitigated or Expired."""
+        key = mitigation_key(row)
+        mit = self.by_key.get(key)
+        status = "Open"
+        if mit:
+            self.seen.add(key)
+            status = "Expired" if mit["_expires"] and mit["_expires"] < self.today else "Mitigated"
+        row["Mitigation Status"] = status
+        for col in MITIGATION_INPUT:
+            row[col] = mit[col] if mit else ""
+        row["Mitigation Key"] = key
+        return status
+
+    def not_in_export(self) -> list[dict[str, Any]]:
+        """Mitigated rows from the previous file whose finding is not in this export (fixed, or
+        filtered out). Kept so the mitigation is not lost if the finding comes back."""
+        return [dict(self.source[k], **{"Mitigation Status": NOT_IN_EXPORT})
+                for k in self.by_key if k not in self.seen]
+
+
+def check_mitigations(path: str) -> int:
+    """--check-mitigations: validate the Mitigation columns and exit. No Veracode access needed."""
+    if not os.path.exists(path):
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+    by_key, _, errors, notes = load_mitigations(path, dt.datetime.now(dt.timezone.utc).date())
+    for msg in errors:
+        print(f"ERROR  {msg}")
+    for msg in notes:
+        print(f"NOTE   {msg}")
+    if errors:
+        print(f"\n{path}: {len(errors)} problem(s). Fix them before merging.")
+        return 2
+    print(f"{path}: {len(by_key)} mitigated finding(s), all valid.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -701,8 +938,9 @@ examples:
   %(prog)s --id CVE-2024-3094
   %(prog)s --library openssl --compact -o openssl.csv
   %(prog)s --list-scans -o scans.csv""")
-    p.add_argument("-o", "--output", default="veracode_iac_findings.csv",
-                   help="Output file. Format follows the extension unless --format is given.")
+    p.add_argument("-o", "--output",
+                   help="Output file (default veracode_iac_findings.csv, or the --mitigations file). "
+                        "Format follows the extension unless --format is given.")
     p.add_argument("--format", choices=("csv", "json", "jsonl"))
     p.add_argument("--summary-csv", metavar="PATH", help="Also write a per-asset rollup CSV.")
 
@@ -761,6 +999,13 @@ examples:
 
     g = p.add_argument_group("modes")
     g.add_argument("--list-scans", action="store_true", help="Export the scan inventory only, no findings.")
+
+    g = p.add_argument_group("mitigations (see MITIGATIONS.md)")
+    g.add_argument("--mitigations", metavar="FILE.csv",
+                   help="Track mitigations in this CSV: read the Mitigation columns filled in by people, "
+                        "then write the fresh export back to it with the mitigations carried over.")
+    g.add_argument("--check-mitigations", metavar="FILE.csv",
+                   help="Only validate the Mitigation columns of this CSV and exit. No Veracode access needed.")
 
     g = p.add_argument_group("connection")
     g.add_argument("--max-workers", type=int, default=4)
@@ -850,6 +1095,28 @@ def build_clauses(args: argparse.Namespace) -> list[Clause]:
 def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_principal_token) -> int:
     args = parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc)
+    if args.check_mitigations:
+        return check_mitigations(args.check_mitigations)
+    mitigations: Optional[MitigationSet] = None
+    mitigation_notes: list[str] = []
+    writes_back = False
+    if args.mitigations:
+        if not args.mitigations.lower().endswith(".csv"):
+            print("error: --mitigations needs a .csv file", file=sys.stderr)
+            return 2
+        args.output = args.output or args.mitigations
+        writes_back = os.path.abspath(args.output) == os.path.abspath(args.mitigations)
+        if writes_back and args.format not in (None, "csv"):
+            print("error: the --mitigations file is written back as CSV; drop --format or use -o", file=sys.stderr)
+            return 2
+        by_key, source, errors, mitigation_notes = load_mitigations(args.mitigations, now.date())
+        if errors:
+            for msg in errors:
+                print(f"error: {args.mitigations} {msg}", file=sys.stderr)
+            print(f"Nothing was changed. Fix {args.mitigations} and run again.", file=sys.stderr)
+            return 2
+        mitigations = MitigationSet(by_key, source, now.date())
+    args.output = args.output or "veracode_iac_findings.csv"
     try:
         clauses = build_clauses(args)
         since = parse_cutoff(args.since, now) if args.since else None
@@ -881,6 +1148,15 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
     user_cols = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
     if args.compact and not user_cols and not args.list_scans:
         user_cols = list(COMPACT_COLUMNS)
+        if mitigations:
+            user_cols = ["Mitigation Status"] + user_cols + MITIGATION_COLUMNS[1:]
+    if user_cols and writes_back:  # never drop the columns people fill in
+        have = {norm(c) for c in user_cols}
+        if norm("Mitigation Status") not in have:
+            user_cols = ["Mitigation Status"] + user_cols
+        user_cols += [c for c in MITIGATION_COLUMNS[1:] if norm(c) not in have]
+    finding_base = (["Mitigation Status"] + BASE_COLUMNS + MITIGATION_COLUMNS[1:]) if mitigations else BASE_COLUMNS
+    mit_status: Counter = Counter()
 
     tracker = Tracker()
     tokens = TokenProvider(minter)
@@ -1014,6 +1290,8 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
                         continue
                     if args.no_extra_columns:
                         row = {k: v for k, v in row.items() if not k.startswith("Finding: ")}
+                    if mitigations:
+                        mitigations.apply(row)  # before filters, so --where "Mitigation Status=..." works
                     if ranks is not None and row["Severity Rank"] not in ranks:
                         continue
                     if not all(c.test(row) for c in finding_clauses):
@@ -1038,6 +1316,8 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
                         h[2] += 1
                     if args.track_history and not is_latest:
                         continue
+                    if mitigations:
+                        mit_status[row["Mitigation Status"]] += 1
                     spool.write(json.dumps(row, ensure_ascii=False) + "\n")
                     kept += 1
                     seen_cols.update(k for k, v in row.items() if v not in ("", None))
@@ -1055,11 +1335,18 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
                     a["Type: " + (row["Finding Type"] or "(none)")] += 1
                     a["scan:" + str(row.get("Scan ID", ""))] = 1
         spool.flush()
+        carried = mitigations.not_in_export() if (mitigations and writes_back) else []
+        for row in carried:
+            seen_cols.update(k for k, v in row.items() if v not in ("", None))
+        if mitigations:
+            for col in MITIGATION_COLUMNS:
+                seen_cols[col] += 1
+            mit_status[NOT_IN_EXPORT] = len(carried)
 
         for col in ("First Seen", "Last Seen", "Seen In Scans"):
             seen_cols[col] = kept
         try:
-            columns = order_columns(seen_cols, BASE_COLUMNS, args.keep_empty_columns, user_cols)
+            columns = order_columns(seen_cols, finding_base, args.keep_empty_columns, user_cols)
         except SystemExit as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -1071,6 +1358,7 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
                 h = history.get(row.get("_track"), ["", "", 1])
                 row["First Seen"], row["Last Seen"], row["Seen In Scans"] = h
                 yield row
+            yield from carried
 
         written = write_output(args.output, fmt, columns, rows(), args.no_csv_safe)
     finally:
@@ -1107,6 +1395,13 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
         print(f"  Fix available      : {fixable}")
     if args.summary_csv:
         print(f"  Per-asset rollup   : {args.summary_csv}")
+    if mitigations:
+        print(f"  Mitigation status  : Open {mit_status['Open']}, Mitigated {mit_status['Mitigated']}, "
+              f"Expired {mit_status['Expired']}, {NOT_IN_EXPORT} {mit_status[NOT_IN_EXPORT]}")
+        for msg in mitigation_notes[:10]:
+            print(f"  NOTE: {msg}")
+        if len(mitigation_notes) > 10:
+            print(f"  NOTE: ...and {len(mitigation_notes) - 10} more (run --check-mitigations)")
     if tokens.refreshes:
         print(f"  Token refreshes    : {tokens.refreshes}")
     for c in clauses:

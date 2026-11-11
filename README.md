@@ -1,320 +1,170 @@
 # Veracode IaC / Container / Secrets Findings Extract
 
-Export Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON
-or JSONL, with filters.
+English | [Español](README.es.md)
+
+Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON or JSONL, one
+row per finding, with filters. To track mitigations for these findings, see [MITIGATIONS.md](MITIGATIONS.md).
+
+## Requirements
+
+- Python 3 (CI uses 3.12)
+- `pip install requests veracode-api-signing veracode-api-py`
+- Veracode API credentials in `~/.veracode/credentials`, or `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`
+- Account with the Reviewer role that can see Container and IaC scans
+
+## Quick Start
 
 ```bash
-python veracode_iac_extract.py --asset "my-org/*" --severity high+ --compact
+python veracode_iac_extract.py                # all findings -> veracode_iac_findings.csv
+python veracode_iac_extract.py --compact      # 12-column developer view
+python veracode_iac_extract.py --list-scans   # scan inventory only, no findings
 ```
 
-The tool outputs:
+Each run ends with a summary: scans queried, findings exported, counts by severity and type, and any
+failed requests.
 
-- One row per finding, with file and line, library and fix version, and a link back to the Platform
-- Filters for asset, scan type, severity, finding type, CVE, library, file and more
-- Asset filtering done server side, so large tenants are not downloaded in full
-- A run that either completes or tells you exactly what is missing
-
-## Install
+## Usage
 
 ```bash
-pip install requests veracode-api-signing veracode-api-py
-```
-
-| Requirement | Detail |
-| --- | --- |
-| Credentials | Standard Veracode API credentials in `~/.veracode/credentials`, or `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET` |
-| Role | Reviewer |
-
-## Quick start
-
-```bash
-python veracode_iac_extract.py                # everything -> veracode_iac_findings.csv
-python veracode_iac_extract.py --compact      # same, short developer view
-python veracode_iac_extract.py --list-scans   # what has been scanned, no findings
-```
-
-## Recipes
-
-### By repo or org
-
-```bash
-# One repo
+# Repos and orgs
 python veracode_iac_extract.py --asset "my-org/payments-api"
-
-# Every repo in an org
-python veracode_iac_extract.py --asset "my-org/*"
-
-# Several patterns
-python veracode_iac_extract.py --asset "my-org/payments-*,my-org/billing-*"
-
-# An org, minus sandboxes and archived repos
 python veracode_iac_extract.py --asset "my-org/*" --exclude-asset "sandbox,archived"
-```
 
-### By scan or asset type
-
-```bash
-# Container images only
+# Scan and asset type
 python veracode_iac_extract.py --scan-type container
-
-# IaC only
-python veracode_iac_extract.py --scan-type iac
-
-# Images from one registry
 python veracode_iac_extract.py --asset-type image --asset "registry.acme.com/*"
 
-# Repos and directories
-python veracode_iac_extract.py --asset-type repo,directory
-```
+# What to fix first
+python veracode_iac_extract.py --latest-only --severity high+ --fixable --compact
 
-### What to fix first
-
-```bash
-# High and critical, with a fix available
-python veracode_iac_extract.py --severity high+ --fixable --compact
-
-# Container vulnerabilities at CVSS 9 or above that can be patched
-python veracode_iac_extract.py --scan-type container --cvss 9 --fixable
-```
-
-### By finding type
-
-```bash
-# Terraform misconfigurations
+# Finding types
 python veracode_iac_extract.py --type misconfiguration --file "*.tf"
-
-# Dockerfile and Kubernetes misconfigurations
-python veracode_iac_extract.py --type misconfiguration --file "Dockerfile,*.yaml,*.yml"
-
-# Leaked secrets
-python veracode_iac_extract.py --type secret
-
-# Secrets found in the last 30 days of scans
 python veracode_iac_extract.py --type secret --since 30d
-```
 
-### "Are we affected?"
-
-```bash
-# A specific CVE
+# Are we affected?
 python veracode_iac_extract.py --id CVE-2024-3094
-
-# A library
-python veracode_iac_extract.py --library openssl
-
-# A library family, serious findings only
 python veracode_iac_extract.py --library "log4j*" --severity critical,high
-```
 
-### Policy, activity and reporting
-
-```bash
-# Findings from scans that failed policy
-python veracode_iac_extract.py --policy failed
-
-# Just the list of failed scans
+# Policy, activity, reporting
 python veracode_iac_extract.py --policy failed --list-scans -o failed_scans.csv
-
-# Last 7 days
-python veracode_iac_extract.py --since 7d
-
-# A date range
 python veracode_iac_extract.py --since 2026-09-01 --until 2026-09-30
-
-# One user's scans, for example the CI account
 python veracode_iac_extract.py --scanned-by ci_pipeline_user
-
-# Per-asset rollup for management
 python veracode_iac_extract.py --summary-csv per_asset.csv
-```
 
-## How matching works
-
-One rule for every text filter.
-
-| You type | It matches |
-| --- | --- |
-| `payments` | Anything **containing** "payments" |
-| `my-org/*` | Wildcard on the whole value. `*` is any text, `?` is one character |
-| `a,b` | a **or** b |
-| `re:^prod-` | Regular expression |
-
-Matching is never case-sensitive. Using several flags together means **and**.
-
-## Filter reference
-
-### Which scans
-
-| Flag | Example | Meaning |
-| --- | --- | --- |
-| `--asset` | `"my-org/*"` | Asset name, asset ID or source |
-| `--exclude-asset` | `sandbox` | Leave these out |
-| `--scan-type` | `container` | `container`, `iac` |
-| `--asset-type` | `image` | `image`, `repo`, `archive`, `directory` |
-| `--policy` | `failed` | `failed`, `passed`, `not-assessed` |
-| `--scanned-by` | `ci_user` | User that ran the scan |
-| `--since`, `--until` | `30d`, `2026-09-01` | Scan date. Relative forms: `12h`, `30d`, `2w` |
-| `--latest-only` | | Only the newest scan per asset |
-| `--scan-id` | `2357847` | A specific scan |
-
-### Which findings
-
-| Flag | Example | Meaning |
-| --- | --- | --- |
-| `--severity` | `high+`, `critical,high` | `+` means "and above" |
-| `--type` | `secret` | `vulnerability`, `misconfiguration`, `secret` |
-| `--id` | `CVE-2024-3094` | CVE or finding ID |
-| `--library` | `openssl` | Vulnerable library, by name or `name@version` |
-| `--file` | `"*.tf"` | File path |
-| `--fixable` | | Only findings with a fix available |
-| `--cvss` | `7` | CVSS of 7 or higher |
-| `--search` | `"public bucket"` | Free text across title, description, fix, IDs, library and path |
-| `--rule` | `"CIS-DI-*"` | Rule ID |
-| `--category` | `Passwords` | Finding category |
-
-### Anything else
-
-`--where "COLUMN=text"` filters on any column in the output. Use `!=` to exclude. Repeat it to
-combine.
-
-```bash
-python veracode_iac_extract.py --where "Service=s3"
+# Any output column
 python veracode_iac_extract.py --where "Scan Policy Status!=passed" --where "Provider=AWS"
 ```
 
-## Output
+### Matching rules (all text filters)
 
-| Flag | Meaning |
+| Value | Matches |
 | --- | --- |
-| `-o FILE` | Output file. The extension picks the format: `.csv` (default), `.json`, `.jsonl` |
-| `--compact` | Short developer view, 12 columns |
-| `--columns "A,B,C"` | Choose and order columns yourself |
+| `payments` | Contains "payments" |
+| `my-org/*` | Wildcard on the whole value (`*` any text, `?` one character) |
+| `a,b` | a or b |
+| `re:^prod-` | Regular expression |
+
+Never case-sensitive. Different flags combine with AND.
+
+### Scan filters (applied before findings are fetched)
+
+| Flag | Values |
+| --- | --- |
+| `--asset`, `--exclude-asset` | Asset name, asset ID or source |
+| `--scan-type` | `container`, `iac` |
+| `--asset-type` | `image`, `repo`, `archive`, `directory` |
+| `--policy` | `failed`, `passed`, `not-assessed` |
+| `--scanned-by` | User that ran the scan |
+| `--since`, `--until` | `YYYY-MM-DD`, or relative: `12h`, `30d`, `2w` |
+| `--latest-only` | Newest scan per asset only (current state, fewest API calls) |
+| `--scan-id` | Specific scan |
+
+### Finding filters (applied after download)
+
+| Flag | Values |
+| --- | --- |
+| `--severity` | `high+` (that level and above) or a list: `critical,high` |
+| `--type` | `vulnerability`, `misconfiguration`, `secret` |
+| `--id` | CVE or finding ID |
+| `--library` | Name or `name@version` |
+| `--file` | File path |
+| `--rule`, `--category` | Rule ID, finding category |
+| `--fixable` | Only findings with a fix available |
+| `--cvss N` | CVSS of N or higher |
+| `--search` | Free text or regex across title, description, fix, IDs, library, category, resource, file path |
+| `--where "COL=text"` | Any output column. `!=` excludes. Repeatable |
+
+### Output
+
+| Flag | Effect |
+| --- | --- |
+| `-o FILE` | Output file (default `veracode_iac_findings.csv`, or the `--mitigations` file). Extension sets the format: `.csv`, `.json`, `.jsonl` |
+| `--format` | Force `csv`, `json` or `jsonl` regardless of extension |
+| `--compact` | Asset Name, Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
+| `--columns "A,B,C"` | Choose and order columns |
 | `--summary-csv FILE` | Per-asset rollup: scans, findings, fixable, counts by severity and type |
-| `--list-scans` | Export the scan inventory only, no findings |
-| `--match-apps` | Add Application Name, Business Unit and Teams where the asset name matches an application profile |
-| `--track-history` | Fill First Seen, Last Seen and Seen In Scans from every scan, but output only the latest scan per asset |
+| `--list-scans` | Scan inventory only |
+| `--match-apps` | Add Application Name, Application GUID, Business Unit, Teams where the asset name matches an application profile |
+| `--track-history` | Fetch every scan to fill First Seen, Last Seen, Seen In Scans; output only the latest scan per asset |
+| `--keep-empty-columns` | Keep columns that are empty for the whole export (dropped by default) |
+| `--no-extra-columns` | Drop the `Scan: <field>` / `Finding: <field>` passthrough columns |
+| `--no-csv-safe` | Do not prefix cells starting with `=`, `+`, `-`, `@` with `'` |
 
-Columns that are empty for the whole export are left out. `--keep-empty-columns` keeps them.
+### Columns (full export)
 
-CSV cells that begin with `=`, `+`, `-` or `@` are prefixed with `'` so a spreadsheet does not
-run them as formulas. `--no-csv-safe` turns this off.
-
-## Columns
-
-### Compact view (`--compact`)
-
-| Column | What it tells you |
+| Group | Columns |
 | --- | --- |
-| Asset Name | Which repo or image |
-| Severity | Critical, High, Medium, Low, Negligible, Unknown |
-| CVSS | Score, where the finding has one |
-| Finding Type | Vulnerability, Misconfiguration or Secret |
-| Finding ID | CVE or rule identifier |
-| Title | Short name of the finding |
-| Library | `name@version` of the vulnerable library |
-| Fixed Versions | Versions that fix it |
-| Location | `path:line` |
-| Suggested Fix | Remediation text |
-| Scan Date | When the scan ran |
-| Veracode Link | Opens the scan in the Platform |
+| What | Severity, Severity Rank (5 critical to 0 unknown), CVSS, Exploitability Score, Impact Score, Finding Type, Finding ID, CVE ID, Rule ID, Category, Title, Description, References, Finding Policy Status |
+| Where | Asset Name, Asset ID, Asset Type, Scan Type, Scan Source, Location (`path:line` or `path:start-end`), File Path, Start Line, End Line, All File Paths, Code Lines, Provider, Service, Resource, Image Tags, Image Distro, Image Hash, Image Labels, Layer IDs |
+| Fix | Library (`name@version`), Library Name, Library Version, Fix Available (blank when no library), Fix State, Fixed Versions, Suggested Fix |
+| Scan | Scan ID, Scan Date, Scan Age Days, Scan Duration, Scan Status, Scanned By, Policy Name, Policy ID, Scan Policy Status, Scan Total Findings, Scan Critical/High/Medium/Low/Negligible/Unknown, Veracode Link |
+| Tracking | Finding Key, Is Latest Scan For Asset, First Seen, Last Seen, Seen In Scans |
 
-### Full export
+API fields not listed appear as `Scan: <field>` or `Finding: <field>` columns.
 
-#### What is it
+## Configuration
 
-| Column | Notes |
-| --- | --- |
-| Severity | Critical to Unknown |
-| Severity Rank | 5 (critical) to 0 (unknown), for sorting |
-| CVSS, Exploitability Score, Impact Score | |
-| Finding Type | Vulnerability, Misconfiguration, Secret |
-| Finding ID, CVE ID, Rule ID, Category | |
-| Title, Description, References | |
-| Finding Policy Status | |
-
-#### Where is it
-
-| Column | Notes |
-| --- | --- |
-| Asset Name, Asset ID, Asset Type | |
-| Scan Type, Scan Source | |
-| Location | `path:line` or `path:start-end` |
-| File Path, Start Line, End Line | |
-| All File Paths | Every path, when a finding has more than one |
-| Code Lines | |
-| Provider, Service, Resource | Cloud misconfigurations |
-| Image Tags, Image Distro, Image Hash, Image Labels, Layer IDs | Container images |
-
-#### How to fix it
-
-| Column | Notes |
-| --- | --- |
-| Library | `name@version` |
-| Library Name, Library Version | |
-| Fix Available | `true` or `false`. Blank for findings with no library |
-| Fix State, Fixed Versions | |
-| Suggested Fix | |
-
-#### About the scan
-
-| Column | Notes |
-| --- | --- |
-| Scan ID, Scan Date, Scan Age Days | |
-| Scan Duration, Scan Status, Scanned By | |
-| Policy Name, Policy ID, Scan Policy Status | |
-| Scan Total Findings | |
-| Scan Critical, High, Medium, Low, Negligible, Unknown | Totals for the whole scan |
-| Veracode Link | Opens the scan in the Platform |
-
-#### Tracking
-
-| Column | Notes |
-| --- | --- |
-| Finding Key | Stable ID for a finding. Use it to diff two exports |
-| Is Latest Scan For Asset | |
-| First Seen, Last Seen, Seen In Scans | Computed across the scans fetched in this run |
-
-Any field the API returns that is not listed above still appears, as a `Scan: <field>` or
-`Finding: <field>` column. `--no-extra-columns` drops those.
-
-## Performance and API load
-
-| What | How |
-| --- | --- |
-| Asset filter | `--asset` is filtered **server side**. `--asset "my-org/*"` only downloads scans matching `my-org/`, not the whole tenant |
-| Scan filters | Scan type, asset type, date and policy are applied to the scan list before any findings are requested |
-| Empty scans | Scans whose severity totals show nothing relevant are skipped. With `--severity critical`, a scan with zero criticals is never fetched |
-| Rate | 2 requests per second across 4 workers |
-| Throttling | On a 429 every worker pauses and the server's `Retry-After` is honoured |
-| Finding filters | `--type`, `--id`, `--library`, `--file` and the rest are applied after download |
-
-| Flag | Default | Meaning |
+| Setting | Default | Purpose |
 | --- | --- | --- |
-| `--rps` | 2 | Maximum requests per second |
+| `--base-url` / `VERACODE_IAC_BASE_URL` | US commercial API | Set for tenants in other regions |
+| `--link-base` / `VERACODE_IAC_LINK_BASE` | US commercial UI | Base of the Veracode Link column |
+| `--ca-cert FILE` | system CAs | Corporate CA bundle (SSL inspection) |
+| `--rps` | 2 | Max requests per second, shared by all workers |
 | `--max-workers` | 4 | Concurrent requests |
 | `--max-attempts` | 6 | Retries per request |
 | `--timeout` | 90 | Seconds per request |
-| `--no-server-search` | off | Download the full scan list and filter `--asset` locally |
-| `--fetch-empty-scans` | off | Also query scans whose totals show no matching findings |
+| `--no-server-search` | off | Filter `--asset` locally instead of with the API search |
+| `--fetch-empty-scans` | off | Also query scans whose severity totals show no matching findings |
+| `--ignore-failures` | off | Exit 0 even if some requests failed |
 
-## Exit codes
+## Important Notes
+
+- `--asset` is filtered server side; scan filters run before any findings are requested. Finding filters run after download.
+- Scans whose severity totals cannot match are skipped: with `--severity critical`, scans with zero criticals are never fetched. Use `--fetch-empty-scans` to override.
+- On HTTP 429 every worker pauses and honours `Retry-After`.
+- `Finding Key` includes the start line, so it changes when code above the finding changes. For a line-independent ID, use `Mitigation Key` (`--mitigations`).
+- First Seen / Last Seen / Seen In Scans only cover the scans fetched in that run.
+- The output file is replaced only when the run finishes; a failed run never leaves a partial file.
+
+## Exit Codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Complete |
-| 1 | Incomplete. Some requests failed and are listed in the summary |
-| 2 | Bad arguments |
+| 1 | Incomplete: some requests failed (listed in the summary) |
+| 2 | Bad arguments or invalid mitigations file |
 | 130 | Interrupted |
-
-The output file is only replaced when a run finishes, so a failed run never leaves a
-half-written file. `--ignore-failures` forces exit 0.
 
 ## Troubleshooting
 
-| Symptom | What to do |
+| Symptom | Fix |
 | --- | --- |
-| Authentication error at start | Check the API credentials, and that the account has the Reviewer role and can see Container and IaC scans in the Platform |
-| TLS or certificate errors | Behind SSL inspection, pass your corporate bundle: `--ca-cert corp.pem` |
-| Tenant is not in the US commercial region | Point the script at your region with `--base-url` or `VERACODE_IAC_BASE_URL` |
-| A filter returns nothing | Run the same command with `--no-server-search` to rule out the server-side search, then check the value against `--list-scans` |
-| "refers to a column that never appeared" | The `--where` column name does not exist in this export. Column names are listed under [Columns](#columns) |
+| Authentication error at start | Check credentials, the Reviewer role, and access to Container/IaC scans |
+| TLS or certificate errors | `--ca-cert corp.pem` |
+| Tenant outside the US commercial region | `--base-url` or `VERACODE_IAC_BASE_URL` |
+| A filter returns nothing | Retry with `--no-server-search`, then compare the value with `--list-scans` output |
+| `refers to a column that never appeared` | The `--where` column does not exist in this export; check the column names above |
+
+## Related Documentation
+
+- [MITIGATIONS.md](MITIGATIONS.md): track mitigations in the export CSV with `--mitigations`
