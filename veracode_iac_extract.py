@@ -1040,7 +1040,7 @@ def load_mitigations(path: str, today: dt.date) -> tuple[dict[str, dict], dict[s
         return {}, {}, [], [f"{path} did not exist yet, so every finding is Open. "
                             "Fill in the Mitigation columns to mitigate."]
     try:
-        rows = read_xlsx_rows(path) if path.lower().endswith(".xlsx") else read_csv_file(path)
+        rows = read_tracking_rows(path)
     except Exception as exc:  # unreadable, corrupt or not a spreadsheet
         return {}, {}, [f"cannot read {path}: {exc}"], []
     if rows and "Mitigation Key" not in rows[0]:
@@ -1123,12 +1123,112 @@ class MitigationSet:
                 for k in self.by_key if k not in self.seen]
 
 
-def check_mitigations(path: str) -> int:
-    """--check-mitigations: validate the Mitigation columns and exit. No Veracode access needed."""
+def read_tracking_rows(path: str) -> list[dict[str, str]]:
+    return read_xlsx_rows(path) if path.lower().endswith(".xlsx") else read_csv_file(path)
+
+
+def tracking_format(path: str) -> Optional[str]:
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    return ext if ext in ("csv", "xlsx") else None
+
+
+def convert_tracking(src: str, dst: str) -> int:
+    """--convert: CSV <-> Excel, offline. Validates the Mitigation columns and refreshes Mitigation Status."""
+    if not tracking_format(src) or not tracking_format(dst):
+        print("error: --convert works between .csv and .xlsx files", file=sys.stderr)
+        return 2
+    if not os.path.exists(src):
+        print(f"error: {src} not found", file=sys.stderr)
+        return 2
+    today = dt.datetime.now(dt.timezone.utc).date()
+    by_key, _, errors, notes = load_mitigations(src, today)
+    if errors:
+        for msg in errors:
+            print(f"error: {src} {msg}", file=sys.stderr)
+        print(f"Nothing was written. Fix {src} and run again.", file=sys.stderr)
+        return 2
+    rows = read_tracking_rows(src)
+    columns = list(rows[0]) if rows else list(MITIGATION_COLUMNS)
+    if rows and "Mitigation Key" not in columns:
+        print(f"error: {src} has no Mitigation Key column. Use a file written with --mitigations", file=sys.stderr)
+        return 2
+    columns = (["Mitigation Status"] if "Mitigation Status" not in columns else []) + columns \
+        + [c for c in MITIGATION_COLUMNS[1:] if c not in columns]
+    for row in rows:
+        mit = by_key.get(str(row.get("Mitigation Key") or "").strip())
+        if row.get("Mitigation Status") == NOT_IN_EXPORT and mit:
+            pass
+        elif mit:
+            row["Mitigation Status"] = "Expired" if mit["_expires"] and mit["_expires"] < today else "Mitigated"
+        else:
+            row["Mitigation Status"] = "Open"
+        for col in MITIGATION_INPUT:
+            row[col] = mit[col] if mit else ""
+    try:
+        n = write_output(dst, tracking_format(dst), columns, rows, raw_cells=False)
+    except SystemExit as exc:  # openpyxl missing
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    for msg in notes:
+        print(f"NOTE   {msg}")
+    print(f"Wrote {n} rows ({len(by_key)} mitigated finding(s)) to {dst}")
+    return 0
+
+
+def _md(value: Any) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ")
+
+
+def mitigation_changes(base: dict[str, dict], new: dict[str, dict], new_src: dict[str, dict],
+                       base_src: dict[str, dict]) -> list[str]:
+    """Markdown rows for mitigations added, changed or removed compared with the base file."""
+    fields = MITIGATION_INPUT
+    out = []
+    for key in sorted(set(base) | set(new), key=lambda k: (k not in new, k)):
+        old, cur = base.get(key), new.get(key)
+        src = (new_src if cur else base_src)[key]
+        if old and cur and all(old[f] == cur[f] for f in fields):
+            continue
+        change = "Added" if not old else ("Removed" if not cur else "Changed")
+
+        def cell(f: str) -> str:
+            if change == "Changed" and old[f] != cur[f]:
+                return f"~~{_md(old[f]) or '(empty)'}~~ {_md(cur[f]) or '(empty)'}"
+            return _md((cur or old)[f])
+
+        out.append(f"| {change} | {_md(src.get('Finding ID'))} | {_md(src.get('Asset Name'))} | "
+                   + " | ".join(cell(f) for f in fields) + " |")
+    return out
+
+
+def check_mitigations(path: str, against: Optional[str] = None) -> int:
+    """--check-mitigations: validate the Mitigation columns, list them, and exit. No Veracode access needed.
+    With --against BASE, print Markdown for a pull request: what changed compared with BASE."""
     if not os.path.exists(path):
         print(f"error: {path} not found", file=sys.stderr)
         return 2
-    by_key, source, errors, notes = load_mitigations(path, dt.datetime.now(dt.timezone.utc).date())
+    today = dt.datetime.now(dt.timezone.utc).date()
+    by_key, source, errors, notes = load_mitigations(path, today)
+    if against is not None:
+        base, base_src = {}, {}
+        if os.path.exists(against) and os.path.getsize(against):
+            base, base_src, _, _ = load_mitigations(against, today)
+        print("## Veracode mitigations\n")
+        print(f"**{path}: {len(errors)} problem(s). Fix them before merging.**\n" if errors
+              else f"**{path}: {len(by_key)} mitigated finding(s), all valid.**\n")
+        changes = mitigation_changes(base, by_key, source, base_src)
+        print("### Changes compared with the base branch\n")
+        if changes:
+            print("| Change | Finding | Asset | Type | Reason | Approved By | Expires | Notes |")
+            print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+            print("\n".join(changes) + "\n")
+        else:
+            print("No mitigation changes.\n")
+        if errors:
+            print("### Problems\n\n" + "\n".join(f"- {_md(m)}" for m in errors) + "\n")
+        if notes:
+            print("### Notes\n\n" + "\n".join(f"- {_md(m)}" for m in notes) + "\n")
+        return 2 if errors else 0
     for key, mit in by_key.items():
         asset = source[key].get("Asset Name", "")
         extra = "".join(f", {label} {mit[col]}" for label, col in (("expires", "Mitigation Expires"),
@@ -1236,8 +1336,14 @@ examples:
                         "people, then write the fresh export back to it with the mitigations carried over. "
                         ".xlsx adds a dropdown, date checks, locked cells and a How to use sheet.")
     g.add_argument("--check-mitigations", metavar="FILE",
-                   help="Only validate the Mitigation columns of this .xlsx or .csv file and exit. "
+                   help="Only validate and list the Mitigation columns of this .xlsx or .csv file, then exit. "
                         "No Veracode access needed.")
+    g.add_argument("--against", metavar="BASE",
+                   help="With --check-mitigations: print Markdown of the mitigations added, changed or removed "
+                        "compared with BASE (for pull requests).")
+    g.add_argument("--convert", nargs=2, metavar=("IN", "OUT"),
+                   help="Convert a tracking file between .csv and .xlsx and exit, for example to edit the CSV "
+                        "in the locked Excel workbook and back. No Veracode access needed.")
 
     g = p.add_argument_group("connection")
     g.add_argument("--max-workers", type=int, default=4)
@@ -1327,8 +1433,13 @@ def build_clauses(args: argparse.Namespace) -> list[Clause]:
 def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_principal_token) -> int:
     args = parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc)
+    if args.convert:
+        return convert_tracking(*args.convert)
+    if args.against and not args.check_mitigations:
+        print("error: --against needs --check-mitigations FILE", file=sys.stderr)
+        return 2
     if args.check_mitigations:
-        return check_mitigations(args.check_mitigations)
+        return check_mitigations(args.check_mitigations, args.against)
     mitigations: Optional[MitigationSet] = None
     mitigation_notes: list[str] = []
     writes_back = False
