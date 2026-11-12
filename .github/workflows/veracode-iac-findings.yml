@@ -1,8 +1,9 @@
-# Daily export of Veracode IaC / Container / Secrets findings with mitigations carried over.
+# Veracode IaC / Container / Secrets findings with mitigations, tracked in veracode-findings.csv.
 #
-#   Every day / Run workflow   reads veracode-findings.xlsx from the repo, exports the latest findings,
-#                              and attaches the refreshed veracode-findings.xlsx to the run
-#   Pull requests              validates the Mitigation columns and lists every mitigation for the reviewer
+#   Every day / Run workflow   refreshes veracode-findings.csv from Veracode and attaches it, plus a locked
+#                              Excel copy for editing (veracode-findings.xlsx), to the run
+#   Pull requests              validates veracode-findings.csv and comments a table of the mitigations
+#                              added, changed or removed compared with the base branch
 #
 # Setup: add the repository secrets VERACODE_API_KEY_ID and VERACODE_API_KEY_SECRET. See MITIGATIONS.md.
 
@@ -14,7 +15,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "veracode-findings.xlsx"
+      - "veracode-findings.csv"
 
 permissions:
   contents: read
@@ -23,13 +24,51 @@ jobs:
   check-mitigations:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # to comment the table of changes
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install requests openpyxl
-      - run: python veracode_iac_extract.py --check-mitigations veracode-findings.xlsx
+      - run: pip install requests
+
+      - name: Compare with the base branch
+        id: check
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --depth=1 origin "$BASE_REF"
+          git show "FETCH_HEAD:veracode-findings.csv" > "$RUNNER_TEMP/base.csv" 2>/dev/null || : > "$RUNNER_TEMP/base.csv"
+          set +e
+          python veracode_iac_extract.py --check-mitigations veracode-findings.csv --against "$RUNNER_TEMP/base.csv" > report.md
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          cat report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        continue-on-error: true   # pull requests from forks get a read-only token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- veracode-mitigations -->'
+          { echo "$marker"; cat report.md; } > comment.md
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi
+
+      - name: Fail if the mitigations are invalid
+        if: steps.check.outputs.rc != '0'
+        run: exit 1
 
   export:
     if: github.event_name != 'pull_request'
@@ -45,11 +84,15 @@ jobs:
           VERACODE_API_KEY_ID: ${{ secrets.VERACODE_API_KEY_ID }}
           VERACODE_API_KEY_SECRET: ${{ secrets.VERACODE_API_KEY_SECRET }}
           EXTRA_ARGS: ${{ vars.VERACODE_EXTRACT_ARGS }}   # optional, e.g. --asset my-org/*
-        run: python veracode_iac_extract.py --compact --mitigations veracode-findings.xlsx $EXTRA_ARGS
+        run: |
+          python veracode_iac_extract.py --compact --mitigations veracode-findings.csv $EXTRA_ARGS
+          python veracode_iac_extract.py --convert veracode-findings.csv veracode-findings.xlsx
       - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: veracode-findings
-          path: veracode-findings.xlsx
+          path: |
+            veracode-findings.csv
+            veracode-findings.xlsx
           if-no-files-found: ignore
           retention-days: 30
