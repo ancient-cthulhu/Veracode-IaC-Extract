@@ -634,14 +634,17 @@ def csv_safe(value: Any) -> Any:
     return value
 
 
-def write_output(path: str, fmt: str, columns: list[str], rows: Iterable[dict], raw_cells: bool) -> int:
+def write_output(path: str, fmt: str, columns: list[str], rows: Iterable[dict], raw_cells: bool,
+                 sheet: str = "Findings") -> int:
     count = 0
     folder = os.path.dirname(os.path.abspath(path))
     os.makedirs(folder, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".iac_", suffix=".tmp", dir=folder)
     os.close(fd)
     try:
-        if fmt == "csv":
+        if fmt == "xlsx":
+            count = write_xlsx(tmp, columns, rows, sheet)
+        elif fmt == "csv":
             with open(tmp, "w", newline="", encoding="utf-8-sig") as fh:
                 w = csv.writer(fh)
                 w.writerow(columns)
@@ -666,6 +669,225 @@ def write_output(path: str, fmt: str, columns: list[str], rows: Iterable[dict], 
         if os.path.exists(tmp):
             os.remove(tmp)
     return count
+
+
+# ---------------------------------------------------------------------------
+# Excel output (.xlsx, needs openpyxl)
+# ---------------------------------------------------------------------------
+
+XLSX_FONT = "Arial"
+XLSX_SEVERITY_FILL = {"Critical": ("C00000", "FFFFFF"), "High": ("FF7C80", "000000"),
+                      "Medium": ("FFC000", "000000"), "Low": ("A9D08E", "000000"),
+                      "Negligible": ("D9D9D9", "000000"), "Unknown": ("D9D9D9", "000000")}
+XLSX_STATUS_FILL = {"Open": "F8CBAD", "Mitigated": "C6EFCE", "Expired": "FFEB9C", "Not in export": "D9D9D9"}
+XLSX_INPUT_FILL = "FFF2CC"
+XLSX_WRAP = {"Title", "Description", "Suggested Fix", "Mitigation Reason", "Mitigation Notes", "References"}
+XLSX_DATE_COLUMNS = {"Mitigation Expires"}
+
+
+def require_openpyxl() -> Any:
+    try:
+        import openpyxl
+    except ImportError:
+        raise SystemExit("Excel files need openpyxl: pip install openpyxl")
+    return openpyxl
+
+
+def xlsx_value(value: Any, column: str) -> Any:
+    """Cell value for Excel: real dates in date columns, text that is never run as a formula."""
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    if value in (None, ""):
+        return None
+    if column in XLSX_DATE_COLUMNS:
+        day, _ = parse_expiry(str(value)) if not isinstance(value, (dt.date, dt.datetime)) else (value, "")
+        if day:
+            return day
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return ILLEGAL_CHARACTERS_RE.sub("", str(value))[:32767]
+
+
+def write_xlsx(path: str, columns: list[str], rows: Iterable[dict], sheet: str) -> int:
+    openpyxl = require_openpyxl()
+    from openpyxl.comments import Comment
+    from openpyxl.styles import Alignment, Font, PatternFill, Protection
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    tracking = "Mitigation Key" in columns
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet
+    fill = lambda rgb: PatternFill("solid", start_color=rgb, end_color=rgb)  # noqa: E731
+    head_font = Font(name=XLSX_FONT, bold=True, color="FFFFFF")
+    body_font = Font(name=XLSX_FONT)
+    link_font = Font(name=XLSX_FONT, color="0563C1", underline="single")
+    key_font = Font(name=XLSX_FONT, color="808080")
+    unlocked = Protection(locked=False)
+    wrap = Alignment(wrap_text=True, vertical="top")
+    top = Alignment(vertical="top")
+    idx = {c: i + 1 for i, c in enumerate(columns)}
+    widths = {c: min(max(len(c), 10), 40) for c in columns}
+
+    for c, i in idx.items():
+        cell = ws.cell(row=1, column=i, value=c)
+        cell.font = head_font
+        cell.fill = fill("BF8F00" if c in MITIGATION_INPUT else "1F3864")
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+    count = 0
+    for count, row in enumerate(rows, 1):
+        r = count + 1
+        for c, i in idx.items():
+            raw = row.get(c, "")
+            value = xlsx_value(raw, c)
+            cell = ws.cell(row=r, column=i, value=value)
+            if isinstance(value, str) and value.startswith("="):
+                cell.data_type = "s"  # scanned content must never become a formula
+            cell.font = body_font
+            cell.alignment = wrap if c in XLSX_WRAP else top
+            if value is not None:
+                widths[c] = max(widths[c], min(len(str(raw)), 60))
+            if c == "Veracode Link" and isinstance(value, str) and value.startswith("http"):
+                cell.hyperlink = value
+                cell.font = link_font
+            elif c == "Severity" and value in XLSX_SEVERITY_FILL:
+                bg, fg = XLSX_SEVERITY_FILL[value]
+                cell.fill, cell.font = fill(bg), Font(name=XLSX_FONT, bold=True, color=fg)
+            elif c == "Mitigation Status" and value in XLSX_STATUS_FILL:
+                cell.fill, cell.font = fill(XLSX_STATUS_FILL[value]), Font(name=XLSX_FONT, bold=True)
+            elif c == "Mitigation Key":
+                cell.font = key_font
+            if tracking and c in MITIGATION_INPUT:
+                cell.protection = unlocked
+                cell.fill = fill(XLSX_INPUT_FILL)
+            if c in XLSX_DATE_COLUMNS:
+                cell.number_format = "yyyy-mm-dd"
+
+    last_row = max(count + 1, 2)
+    for c, i in idx.items():
+        letter = get_column_letter(i)
+        ws.column_dimensions[letter].width = (min(widths[c], 50) if c in XLSX_WRAP else widths[c]) + 2
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{last_row}"
+    ws.page_setup.orientation = "landscape"   # print: one page wide, header row on every page
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.print_title_rows = "1:1"
+
+    if tracking:
+        notes = {
+            "Mitigation Status": "Set by the script: Open, Mitigated, Expired or Not in export. Do not edit.",
+            "Mitigation Type": "Pick from the list to mitigate this finding.",
+            "Mitigation Reason": "Required. Why this finding is mitigated.",
+            "Mitigation Approved By": "Required. Who approved it.",
+            "Mitigation Expires": "YYYY-MM-DD. Required for accept-risk. After this date the finding is open again.",
+            "Mitigation Notes": "Optional: ticket or change number.",
+            "Mitigation Key": "Set by the script. Links this row to the finding on the next run. Do not edit.",
+        }
+        for c, text in notes.items():
+            if c in idx:
+                ws.cell(row=1, column=idx[c]).comment = Comment(text, "veracode_iac_extract")
+        rng = lambda c: f"{get_column_letter(idx[c])}2:{get_column_letter(idx[c])}{max(last_row, 5000)}"  # noqa: E731
+        dv_type = DataValidation(type="list", formula1='"' + ",".join(MITIGATION_TYPES) + '"', allow_blank=True,
+                                 showErrorMessage=True, errorTitle="Mitigation Type",
+                                 error="Pick a type from the list.", promptTitle="Mitigation Type",
+                                 prompt="Pick a type. Then fill in Reason and Approved By.", showInputMessage=True)
+        dv_date = DataValidation(type="date", operator="greaterThan", formula1="36526", allow_blank=True,
+                                 showErrorMessage=True, errorTitle="Mitigation Expires",
+                                 error="Enter a date, for example 2027-12-31.", promptTitle="Mitigation Expires",
+                                 prompt="Date, YYYY-MM-DD. Required for accept-risk.", showInputMessage=True)
+        for dv, col in ((dv_type, "Mitigation Type"), (dv_date, "Mitigation Expires")):
+            if col in idx:
+                ws.add_data_validation(dv)
+                dv.add(rng(col))
+        ws.protection.sheet = True          # only the yellow Mitigation cells can be edited
+        ws.protection.autoFilter = False    # filtering still allowed
+        ws.protection.sort = False
+        ws.protection.formatColumns = False
+        ws.protection.formatRows = False
+        add_instructions_sheet(wb, Font, PatternFill, Alignment)
+    wb.save(path)
+    return count
+
+
+def add_instructions_sheet(wb: Any, Font: Any, PatternFill: Any, Alignment: Any) -> None:
+    ws = wb.create_sheet("How to use")
+    bold = Font(name=XLSX_FONT, bold=True)
+    title = Font(name=XLSX_FONT, bold=True, size=14)
+    body = Font(name=XLSX_FONT)
+    yellow = PatternFill("solid", start_color=XLSX_INPUT_FILL, end_color=XLSX_INPUT_FILL)
+    lines: list[tuple[str, ...]] = [
+        ("How to mitigate a finding",),
+        (),
+        ("1.", "On the Findings sheet, find the row. Only the yellow Mitigation cells can be edited."),
+        ("2.", "Pick a Mitigation Type from the list, then fill in Mitigation Reason and Mitigation Approved By."),
+        ("3.", "For accept-risk, set Mitigation Expires (YYYY-MM-DD)."),
+        ("4.", "Save the file as .xlsx, keep its name, and commit it through a pull request."),
+        ("5.", "The next run reads your mitigations and carries them onto the fresh findings."),
+        (),
+        ("Do not edit", "Mitigation Key or Mitigation Status. The script sets them; the key links the row to "
+                        "the finding on the next run."),
+        (),
+        ("Example row",),
+        ("Mitigation Type", "Mitigation Reason", "Mitigation Approved By", "Mitigation Expires", "Mitigation Notes"),
+        ("accept-risk", "Bucket serves the public status page through CloudFront", "lead@acme.com", "2027-11-09",
+         "CHG-4411"),
+        (),
+        ("Mitigation types",),
+        *[(name, text) for name, text in MITIGATION_TYPES.items()],
+        (),
+        ("Mitigation Status",),
+        ("Open", "Not mitigated."),
+        ("Mitigated", "Mitigated and not expired."),
+        ("Expired", "Mitigation Expires has passed. Counts as open: renew the date or fix it."),
+        ("Not in export", "Mitigated, but the finding was not in this export (fixed, or filtered out). Kept so the "
+                          "mitigation returns if the finding does. Delete the row when no longer needed."),
+    ]
+    example_header = next(i for i, ln in enumerate(lines, 1) if ln and ln[0] == "Mitigation Type")
+    for r, line in enumerate(lines, 1):
+        for c, text in enumerate(line, 1):
+            cell = ws.cell(row=r, column=c, value=text)
+            if r == 1:
+                cell.font = title
+            elif c == 1 or len(line) == 1 or r == example_header:
+                cell.font = bold
+            else:
+                cell.font = body
+            cell.alignment = Alignment(wrap_text=r != 1, vertical="top")
+            if r == example_header + 1:
+                cell.fill = yellow
+    for letter, width in zip("ABCDE", (22, 70, 24, 20, 18)):
+        ws.column_dimensions[letter].width = width
+    ws.page_setup.orientation = "landscape"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.protection.sheet = True
+
+
+def read_xlsx_rows(path: str) -> list[dict[str, str]]:
+    openpyxl = require_openpyxl()
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb["Findings"] if "Findings" in wb.sheetnames else wb.worksheets[0]
+    it = ws.iter_rows(values_only=True)
+    header = [str(h) if h is not None else "" for h in next(it, ())]
+    out = []
+    for values in it:
+        if not any(v not in (None, "") for v in values):
+            continue
+        row = {}
+        for h, v in zip(header, values):
+            if not h:
+                continue
+            if isinstance(v, dt.datetime):
+                v = v.date().isoformat() if h in XLSX_DATE_COLUMNS else v.isoformat()
+            elif isinstance(v, dt.date):
+                v = v.isoformat()
+            elif isinstance(v, float) and v.is_integer() and h not in ("CVSS",):
+                v = str(int(v))
+            row[h] = "" if v is None else str(v)
+        out.append(row)
+    wb.close()
+    return out
 
 
 def order_columns(seen: Counter, base: list[str], keep_empty: bool, user_cols: Optional[list[str]]) -> list[str]:
@@ -818,8 +1040,8 @@ def load_mitigations(path: str, today: dt.date) -> tuple[dict[str, dict], dict[s
         return {}, {}, [], [f"{path} did not exist yet, so every finding is Open. "
                             "Fill in the Mitigation columns to mitigate."]
     try:
-        rows = read_csv_file(path)
-    except (OSError, csv.Error) as exc:
+        rows = read_xlsx_rows(path) if path.lower().endswith(".xlsx") else read_csv_file(path)
+    except Exception as exc:  # unreadable, corrupt or not a spreadsheet
         return {}, {}, [f"cannot read {path}: {exc}"], []
     if rows and "Mitigation Key" not in rows[0]:
         return {}, {}, [f"{path} has no Mitigation Key column. Use a CSV written with --mitigations"], []
@@ -832,7 +1054,7 @@ def load_mitigations(path: str, today: dt.date) -> tuple[dict[str, dict], dict[s
         vals = {c: str(row.get(c) or "").strip() for c in MITIGATION_INPUT}
         if not any(vals.values()):
             continue
-        where = f"line {line} ({row.get('Finding ID') or row.get('Mitigation Key') or '?'})"
+        where = f"row {line} ({row.get('Finding ID') or row.get('Mitigation Key') or '?'})"
         key = str(row.get("Mitigation Key") or "").strip()
         problems = []
         if not _RE_MKEY.match(key):
@@ -858,11 +1080,11 @@ def load_mitigations(path: str, today: dt.date) -> tuple[dict[str, dict], dict[s
         mit = {"Mitigation Type": mtype, "Mitigation Reason": vals["Mitigation Reason"],
                "Mitigation Approved By": vals["Mitigation Approved By"],
                "Mitigation Expires": expires.isoformat() if expires else "",
-               "Mitigation Notes": vals["Mitigation Notes"], "_expires": expires}
+               "Mitigation Notes": vals["Mitigation Notes"], "_expires": expires, "_where": where}
         if key in by_key:
             if {k: v for k, v in by_key[key].items() if not k.startswith("_")} != \
                     {k: v for k, v in mit.items() if not k.startswith("_")}:
-                errors.append(f"{where}: same Mitigation Key as line {line_of[key]} but a different mitigation. "
+                errors.append(f"{where}: same Mitigation Key as row {line_of[key]} but a different mitigation. "
                               "Make them match or clear one")
             continue
         by_key[key], source[key], line_of[key] = mit, row, line
@@ -906,7 +1128,13 @@ def check_mitigations(path: str) -> int:
     if not os.path.exists(path):
         print(f"error: {path} not found", file=sys.stderr)
         return 2
-    by_key, _, errors, notes = load_mitigations(path, dt.datetime.now(dt.timezone.utc).date())
+    by_key, source, errors, notes = load_mitigations(path, dt.datetime.now(dt.timezone.utc).date())
+    for key, mit in by_key.items():
+        asset = source[key].get("Asset Name", "")
+        extra = "".join(f", {label} {mit[col]}" for label, col in (("expires", "Mitigation Expires"),
+                                                                    ("notes:", "Mitigation Notes")) if mit[col])
+        print(f"OK     {mit['_where']} {asset}: {mit['Mitigation Type']}, approved by "
+              f"{mit['Mitigation Approved By']}{extra}. {mit['Mitigation Reason']}")
     for msg in errors:
         print(f"ERROR  {msg}")
     for msg in notes:
@@ -941,7 +1169,7 @@ examples:
     p.add_argument("-o", "--output",
                    help="Output file (default veracode_iac_findings.csv, or the --mitigations file). "
                         "Format follows the extension unless --format is given.")
-    p.add_argument("--format", choices=("csv", "json", "jsonl"))
+    p.add_argument("--format", choices=("csv", "json", "jsonl", "xlsx"))
     p.add_argument("--summary-csv", metavar="PATH", help="Also write a per-asset rollup CSV.")
 
     g = p.add_argument_group("scan filters (applied before findings are fetched)")
@@ -1003,11 +1231,13 @@ examples:
     g.add_argument("--list-scans", action="store_true", help="Export the scan inventory only, no findings.")
 
     g = p.add_argument_group("mitigations (see MITIGATIONS.md)")
-    g.add_argument("--mitigations", metavar="FILE.csv",
-                   help="Track mitigations in this CSV: read the Mitigation columns filled in by people, "
-                        "then write the fresh export back to it with the mitigations carried over.")
-    g.add_argument("--check-mitigations", metavar="FILE.csv",
-                   help="Only validate the Mitigation columns of this CSV and exit. No Veracode access needed.")
+    g.add_argument("--mitigations", metavar="FILE",
+                   help="Track mitigations in this .xlsx or .csv file: read the Mitigation columns filled in by "
+                        "people, then write the fresh export back to it with the mitigations carried over. "
+                        ".xlsx adds a dropdown, date checks, locked cells and a How to use sheet.")
+    g.add_argument("--check-mitigations", metavar="FILE",
+                   help="Only validate the Mitigation columns of this .xlsx or .csv file and exit. "
+                        "No Veracode access needed.")
 
     g = p.add_argument_group("connection")
     g.add_argument("--max-workers", type=int, default=4)
@@ -1103,13 +1333,15 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
     mitigation_notes: list[str] = []
     writes_back = False
     if args.mitigations:
-        if not args.mitigations.lower().endswith(".csv"):
-            print("error: --mitigations needs a .csv file", file=sys.stderr)
+        tracking_fmt = os.path.splitext(args.mitigations)[1].lower().lstrip(".")
+        if tracking_fmt not in ("csv", "xlsx"):
+            print("error: --mitigations needs a .xlsx or .csv file", file=sys.stderr)
             return 2
         args.output = args.output or args.mitigations
         writes_back = os.path.abspath(args.output) == os.path.abspath(args.mitigations)
-        if writes_back and args.format not in (None, "csv"):
-            print("error: the --mitigations file is written back as CSV; drop --format or use -o", file=sys.stderr)
+        if writes_back and args.format not in (None, tracking_fmt):
+            print(f"error: the --mitigations file is written back as {tracking_fmt}; drop --format or use -o",
+                  file=sys.stderr)
             return 2
         by_key, source, errors, mitigation_notes = load_mitigations(args.mitigations, now.date())
         if errors:
@@ -1142,7 +1374,7 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
     if args.ca_cert and not os.path.isfile(args.ca_cert):
         print(f"error: CA certificate not found: {args.ca_cert}", file=sys.stderr)
         return 2
-    fmt = args.format or {".json": "json", ".jsonl": "jsonl", ".ndjson": "jsonl"}.get(
+    fmt = args.format or {".json": "json", ".jsonl": "jsonl", ".ndjson": "jsonl", ".xlsx": "xlsx"}.get(
         os.path.splitext(args.output)[1].lower(), "csv")
     try:
         ranks = parse_severities(args.severity, args.min_severity)
@@ -1230,7 +1462,7 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
         seen = Counter(k for _, r in selected for k, v in r.items() if v not in ("", None))
         cols = order_columns(seen, SCAN_INVENTORY_COLUMNS + [c for c in BASE_COLUMNS if c.startswith(("Application", "Business", "Teams"))],
                              args.keep_empty_columns, user_cols)
-        n = write_output(args.output, fmt, cols, (r for _, r in selected), args.no_csv_safe)
+        n = write_output(args.output, fmt, cols, (r for _, r in selected), args.no_csv_safe, sheet="Scans")
         print(f"\nWrote {n} scans to {args.output}")
         return 0 if (not tracker.failures or args.ignore_failures) else 1
 

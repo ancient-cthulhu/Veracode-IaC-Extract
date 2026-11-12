@@ -2,14 +2,15 @@
 
 [English](README.md) | Español
 
-Exporta los hallazgos de Veracode Container Security (imágenes de contenedor, IaC, secretos) a CSV, JSON o
-JSONL, una fila por hallazgo, con filtros. Para gestionar mitigaciones de estos hallazgos, consulta
+Exporta los hallazgos de Veracode Container Security (imágenes de contenedor, IaC, secretos) a CSV, JSON,
+JSONL o Excel, una fila por hallazgo, con filtros. Para gestionar mitigaciones de estos hallazgos, consulta
 [MITIGATIONS.es.md](MITIGATIONS.es.md).
 
 ## Requisitos
 
 - Python 3 (CI usa 3.12)
 - `pip install requests veracode-api-signing veracode-api-py`
+- `pip install openpyxl` para la salida en Excel (`.xlsx`)
 - Credenciales de la API de Veracode en `~/.veracode/credentials`, o `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`
 - Cuenta con rol Reviewer que pueda ver los escaneos de Container e IaC
 
@@ -100,8 +101,8 @@ Nunca distingue mayúsculas de minúsculas. Varios flags se combinan con Y.
 
 | Flag | Efecto |
 | --- | --- |
-| `-o ARCHIVO` | Archivo de salida (por defecto `veracode_iac_findings.csv`, o el archivo de `--mitigations`). La extensión fija el formato: `.csv`, `.json`, `.jsonl` |
-| `--format` | Fuerza `csv`, `json` o `jsonl` sin importar la extensión |
+| `-o ARCHIVO` | Archivo de salida (por defecto `veracode_iac_findings.csv`, o el archivo de `--mitigations`). La extensión fija el formato: `.csv`, `.json`, `.jsonl`, `.xlsx` |
+| `--format` | Fuerza `csv`, `json`, `jsonl` o `xlsx` sin importar la extensión |
 | `--compact` | Asset Name, Scan Type (`container`, `iac`), Asset Type (`image`, `repo`, `archive`, `directory`), Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
 | `--columns "A,B,C"` | Elige y ordena las columnas |
 | `--summary-csv ARCHIVO` | Resumen por asset: escaneos, hallazgos, corregibles, recuentos por severidad y tipo |
@@ -125,6 +126,10 @@ Los nombres de columna salen en inglés.
 | Seguimiento | Finding Key, Is Latest Scan For Asset, First Seen, Last Seen, Seen In Scans |
 
 Los campos de la API que no aparecen arriba se incluyen como columnas `Scan: <campo>` o `Finding: <campo>`.
+
+La salida en Excel (`.xlsx`) tiene el encabezado fijo y con filtros, colores por severidad, Veracode Link con
+enlace, y se imprime en una página de ancho. Las celdas siempre son texto, nunca fórmulas. `--list-scans`
+escribe una hoja `Scans`.
 
 ## Configuración
 

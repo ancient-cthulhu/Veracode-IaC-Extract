@@ -2,13 +2,14 @@
 
 English | [Español](README.es.md)
 
-Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON or JSONL, one
-row per finding, with filters. To track mitigations for these findings, see [MITIGATIONS.md](MITIGATIONS.md).
+Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON, JSONL or Excel,
+one row per finding, with filters. To track mitigations for these findings, see [MITIGATIONS.md](MITIGATIONS.md).
 
 ## Requirements
 
 - Python 3 (CI uses 3.12)
 - `pip install requests veracode-api-signing veracode-api-py`
+- `pip install openpyxl` for Excel (`.xlsx`) output
 - Veracode API credentials in `~/.veracode/credentials`, or `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`
 - Account with the Reviewer role that can see Container and IaC scans
 
@@ -99,8 +100,8 @@ Never case-sensitive. Different flags combine with AND.
 
 | Flag | Effect |
 | --- | --- |
-| `-o FILE` | Output file (default `veracode_iac_findings.csv`, or the `--mitigations` file). Extension sets the format: `.csv`, `.json`, `.jsonl` |
-| `--format` | Force `csv`, `json` or `jsonl` regardless of extension |
+| `-o FILE` | Output file (default `veracode_iac_findings.csv`, or the `--mitigations` file). Extension sets the format: `.csv`, `.json`, `.jsonl`, `.xlsx` |
+| `--format` | Force `csv`, `json`, `jsonl` or `xlsx` regardless of extension |
 | `--compact` | Asset Name, Scan Type (`container`, `iac`), Asset Type (`image`, `repo`, `archive`, `directory`), Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
 | `--columns "A,B,C"` | Choose and order columns |
 | `--summary-csv FILE` | Per-asset rollup: scans, findings, fixable, counts by severity and type |
@@ -122,6 +123,9 @@ Never case-sensitive. Different flags combine with AND.
 | Tracking | Finding Key, Is Latest Scan For Asset, First Seen, Last Seen, Seen In Scans |
 
 API fields not listed appear as `Scan: <field>` or `Finding: <field>` columns.
+
+Excel output (`.xlsx`) has a frozen, filterable header, severity colours, clickable Veracode Link, and prints
+one page wide. Cells are always text, never formulas. `--list-scans` writes a `Scans` sheet.
 
 ## Configuration
 
