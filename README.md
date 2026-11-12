@@ -16,7 +16,7 @@ row per finding, with filters. To track mitigations for these findings, see [MIT
 
 ```bash
 python veracode_iac_extract.py                # all findings -> veracode_iac_findings.csv
-python veracode_iac_extract.py --compact      # 12-column developer view
+python veracode_iac_extract.py --compact      # 14-column developer view
 python veracode_iac_extract.py --list-scans   # scan inventory only, no findings
 ```
 
@@ -100,7 +100,7 @@ Never case-sensitive. Different flags combine with AND.
 | --- | --- |
 | `-o FILE` | Output file (default `veracode_iac_findings.csv`, or the `--mitigations` file). Extension sets the format: `.csv`, `.json`, `.jsonl` |
 | `--format` | Force `csv`, `json` or `jsonl` regardless of extension |
-| `--compact` | Asset Name, Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
+| `--compact` | Asset Name, Scan Type (`container`, `iac`), Asset Type (`image`, `repo`, `archive`, `directory`), Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
 | `--columns "A,B,C"` | Choose and order columns |
 | `--summary-csv FILE` | Per-asset rollup: scans, findings, fixable, counts by severity and type |
 | `--list-scans` | Scan inventory only |

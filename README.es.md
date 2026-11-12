@@ -17,7 +17,7 @@ JSONL, una fila por hallazgo, con filtros. Para gestionar mitigaciones de estos 
 
 ```bash
 python veracode_iac_extract.py                # todos los hallazgos -> veracode_iac_findings.csv
-python veracode_iac_extract.py --compact      # vista de 12 columnas para desarrolladores
+python veracode_iac_extract.py --compact      # vista de 14 columnas para desarrolladores
 python veracode_iac_extract.py --list-scans   # solo el inventario de escaneos, sin hallazgos
 ```
 
@@ -101,7 +101,7 @@ Nunca distingue mayúsculas de minúsculas. Varios flags se combinan con Y.
 | --- | --- |
 | `-o ARCHIVO` | Archivo de salida (por defecto `veracode_iac_findings.csv`, o el archivo de `--mitigations`). La extensión fija el formato: `.csv`, `.json`, `.jsonl` |
 | `--format` | Fuerza `csv`, `json` o `jsonl` sin importar la extensión |
-| `--compact` | Asset Name, Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
+| `--compact` | Asset Name, Scan Type (`container`, `iac`), Asset Type (`image`, `repo`, `archive`, `directory`), Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
 | `--columns "A,B,C"` | Elige y ordena las columnas |
 | `--summary-csv ARCHIVO` | Resumen por asset: escaneos, hallazgos, corregibles, recuentos por severidad y tipo |
 | `--list-scans` | Solo el inventario de escaneos |

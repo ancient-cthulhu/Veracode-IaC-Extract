@@ -116,7 +116,7 @@ BASE_COLUMNS = [
 CORE_COLUMNS = {"Asset Name", "Severity", "Finding Type", "Finding ID", "Title",
                 "File Path", "Scan ID", "Scan Date"}
 POLICY_VALUES = {"failed": "error", "passed": "success", "not-assessed": "default"}
-COMPACT_COLUMNS = ["Asset Name", "Severity", "CVSS", "Finding Type", "Finding ID", "Title",
+COMPACT_COLUMNS = ["Asset Name", "Scan Type", "Asset Type", "Severity", "CVSS", "Finding Type", "Finding ID", "Title",
                    "Library", "Fixed Versions", "Location", "Suggested Fix", "Scan Date", "Veracode Link"]
 SCAN_INVENTORY_COLUMNS = [
     "Asset Name", "Asset ID", "Asset Type", "Scan Type", "Scan Source", "Is Source Link",
