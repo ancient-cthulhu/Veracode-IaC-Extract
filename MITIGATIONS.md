@@ -15,7 +15,7 @@ Same as [README.md](README.md#requirements). No extra packages.
 1. Export to the tracking file (created on the first run, every finding `Open`):
 
    ```bash
-   python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv
+   python veracode_iac_extract.py --compact --mitigations veracode-findings.csv
    ```
 
 2. Open `veracode-findings.csv` in Excel. On each row to mitigate, fill in:
@@ -46,10 +46,10 @@ Same as [README.md](README.md#requirements). No extra packages.
 
 ```bash
 # Refresh the tracking file (reads it, then writes it back)
-python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv
+python veracode_iac_extract.py --compact --mitigations veracode-findings.csv
 
 # Only what still needs fixing, to a separate file (the tracking file is not changed)
-python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv \
+python veracode_iac_extract.py --compact --mitigations veracode-findings.csv \
   --where "Mitigation Status!=Mitigated" -o to-fix.csv
 
 # Validate the Mitigation columns (no Veracode access needed)

@@ -955,8 +955,10 @@ examples:
     g.add_argument("--scan-id", action="append", metavar="PATTERN")
     g.add_argument("--since", metavar="DATE|Nd", help="Only scans on/after this (YYYY-MM-DD, 30d, 12h, 2w).")
     g.add_argument("--until", metavar="DATE|Nd", help="Only scans on/before this.")
+    g.add_argument("--all-scans", action="store_true",
+                   help="Every scan in history, not just the latest per asset. A finding appears once per scan.")
     g.add_argument("--latest-only", action="store_true",
-                   help="Only the most recent scan per asset (current state, fewest API calls).")
+                   help="Only the most recent scan per asset. This is the default; kept for compatibility.")
     g.add_argument("--track-history", action="store_true",
                    help="Fetch every scan to compute First Seen / Last Seen / Seen In Scans, "
                         "but only output findings from the latest scan per asset.")
@@ -1132,9 +1134,11 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
     except (ValueError, re.error, argparse.ArgumentTypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if args.latest_only and args.track_history:
-        print("error: --latest-only and --track-history are mutually exclusive", file=sys.stderr)
+    if args.latest_only and args.all_scans:
+        print("error: --latest-only and --all-scans are mutually exclusive", file=sys.stderr)
         return 2
+    # Default: latest scan per asset. --track-history and --scan-id need older scans too.
+    latest_only = not (args.all_scans or args.track_history or args.scan_id)
     if args.ca_cert and not os.path.isfile(args.ca_cert):
         print(f"error: CA certificate not found: {args.ca_cert}", file=sys.stderr)
         return 2
@@ -1213,7 +1217,7 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
             continue
         if until and (not when or when > until):
             continue
-        if args.latest_only and r["Is Latest Scan For Asset"] != "true":
+        if latest_only and r["Is Latest Scan For Asset"] != "true":
             continue
         if all(c.test(r) for c in scan_clauses):
             selected.append((s, r))

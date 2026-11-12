@@ -16,7 +16,7 @@ Los mismos que en [README.es.md](README.es.md#requisitos). Sin paquetes adiciona
 1. Exporta al archivo de seguimiento (se crea en la primera ejecución, con todos los hallazgos `Open`):
 
    ```bash
-   python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv
+   python veracode_iac_extract.py --compact --mitigations veracode-findings.csv
    ```
 
 2. Abre `veracode-findings.csv` en Excel. En cada fila que quieras mitigar, rellena:
@@ -47,10 +47,10 @@ Los mismos que en [README.es.md](README.es.md#requisitos). Sin paquetes adiciona
 
 ```bash
 # Actualizar el archivo de seguimiento (lo lee y lo vuelve a escribir)
-python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv
+python veracode_iac_extract.py --compact --mitigations veracode-findings.csv
 
 # Solo lo que falta por corregir, en otro archivo (el de seguimiento no cambia)
-python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv \
+python veracode_iac_extract.py --compact --mitigations veracode-findings.csv \
   --where "Mitigation Status!=Mitigated" -o to-fix.csv
 
 # Validar las columnas Mitigation (sin acceso a Veracode)

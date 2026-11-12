@@ -16,9 +16,10 @@ JSONL, una fila por hallazgo, con filtros. Para gestionar mitigaciones de estos 
 ## Inicio rápido
 
 ```bash
-python veracode_iac_extract.py                # todos los hallazgos -> veracode_iac_findings.csv
+python veracode_iac_extract.py                # último escaneo de cada asset -> veracode_iac_findings.csv
 python veracode_iac_extract.py --compact      # vista de 14 columnas para desarrolladores
 python veracode_iac_extract.py --list-scans   # solo el inventario de escaneos, sin hallazgos
+python veracode_iac_extract.py --all-scans    # todos los escaneos del historial, una fila por hallazgo y escaneo
 ```
 
 Cada ejecución termina con un resumen: escaneos consultados, hallazgos exportados, recuentos por severidad y
@@ -36,7 +37,7 @@ python veracode_iac_extract.py --scan-type container
 python veracode_iac_extract.py --asset-type image --asset "registry.acme.com/*"
 
 # Qué corregir primero
-python veracode_iac_extract.py --latest-only --severity high+ --fixable --compact
+python veracode_iac_extract.py --severity high+ --fixable --compact
 
 # Tipos de hallazgo
 python veracode_iac_extract.py --type misconfiguration --file "*.tf"
@@ -48,7 +49,7 @@ python veracode_iac_extract.py --library "log4j*" --severity critical,high
 
 # Políticas, actividad, informes
 python veracode_iac_extract.py --policy failed --list-scans -o failed_scans.csv
-python veracode_iac_extract.py --since 2026-09-01 --until 2026-09-30
+python veracode_iac_extract.py --all-scans --since 2026-09-01 --until 2026-09-30
 python veracode_iac_extract.py --scanned-by ci_pipeline_user
 python veracode_iac_extract.py --summary-csv per_asset.csv
 
@@ -77,8 +78,8 @@ Nunca distingue mayúsculas de minúsculas. Varios flags se combinan con Y.
 | `--policy` | `failed`, `passed`, `not-assessed` |
 | `--scanned-by` | Usuario que lanzó el escaneo |
 | `--since`, `--until` | `AAAA-MM-DD`, o relativo: `12h`, `30d`, `2w` |
-| `--latest-only` | Solo el escaneo más reciente de cada asset (estado actual, menos llamadas a la API) |
-| `--scan-id` | Un escaneo concreto |
+| `--all-scans` | Todos los escaneos del historial en lugar de solo el último de cada asset (por defecto) |
+| `--scan-id` | Un escaneo concreto, sea el último o no |
 
 ### Filtros de hallazgo (después de la descarga)
 
@@ -146,6 +147,7 @@ Los campos de la API que no aparecen arriba se incluyen como columnas `Scan: <ca
 - Se omiten los escaneos cuyos totales por severidad no pueden coincidir: con `--severity critical`, nunca se consulta un escaneo sin critical. `--fetch-empty-scans` lo desactiva.
 - Ante un HTTP 429 todos los workers se pausan y se respeta `Retry-After`.
 - `Finding Key` incluye la línea de inicio, así que cambia si cambia el código por encima del hallazgo. Para un ID independiente de la línea, usa `Mitigation Key` (`--mitigations`).
+- **Por defecto solo se exporta el último escaneo de cada asset.** `--since` / `--until` mantienen entonces los últimos escaneos dentro de ese periodo; añade `--all-scans` para todos los escaneos de un periodo. `--latest-only` se sigue aceptando y no cambia nada.
 - First Seen / Last Seen / Seen In Scans solo cubren los escaneos obtenidos en esa ejecución.
 - El archivo de salida solo se sustituye cuando la ejecución termina; una ejecución fallida nunca deja un archivo a medias.
 

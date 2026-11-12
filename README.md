@@ -15,9 +15,10 @@ row per finding, with filters. To track mitigations for these findings, see [MIT
 ## Quick Start
 
 ```bash
-python veracode_iac_extract.py                # all findings -> veracode_iac_findings.csv
+python veracode_iac_extract.py                # latest scan per asset -> veracode_iac_findings.csv
 python veracode_iac_extract.py --compact      # 14-column developer view
 python veracode_iac_extract.py --list-scans   # scan inventory only, no findings
+python veracode_iac_extract.py --all-scans    # every scan in history, one row per finding per scan
 ```
 
 Each run ends with a summary: scans queried, findings exported, counts by severity and type, and any
@@ -35,7 +36,7 @@ python veracode_iac_extract.py --scan-type container
 python veracode_iac_extract.py --asset-type image --asset "registry.acme.com/*"
 
 # What to fix first
-python veracode_iac_extract.py --latest-only --severity high+ --fixable --compact
+python veracode_iac_extract.py --severity high+ --fixable --compact
 
 # Finding types
 python veracode_iac_extract.py --type misconfiguration --file "*.tf"
@@ -47,7 +48,7 @@ python veracode_iac_extract.py --library "log4j*" --severity critical,high
 
 # Policy, activity, reporting
 python veracode_iac_extract.py --policy failed --list-scans -o failed_scans.csv
-python veracode_iac_extract.py --since 2026-09-01 --until 2026-09-30
+python veracode_iac_extract.py --all-scans --since 2026-09-01 --until 2026-09-30
 python veracode_iac_extract.py --scanned-by ci_pipeline_user
 python veracode_iac_extract.py --summary-csv per_asset.csv
 
@@ -76,8 +77,8 @@ Never case-sensitive. Different flags combine with AND.
 | `--policy` | `failed`, `passed`, `not-assessed` |
 | `--scanned-by` | User that ran the scan |
 | `--since`, `--until` | `YYYY-MM-DD`, or relative: `12h`, `30d`, `2w` |
-| `--latest-only` | Newest scan per asset only (current state, fewest API calls) |
-| `--scan-id` | Specific scan |
+| `--all-scans` | Every scan in history instead of only the latest per asset (the default) |
+| `--scan-id` | Specific scan, latest or not |
 
 ### Finding filters (applied after download)
 
@@ -143,6 +144,7 @@ API fields not listed appear as `Scan: <field>` or `Finding: <field>` columns.
 - Scans whose severity totals cannot match are skipped: with `--severity critical`, scans with zero criticals are never fetched. Use `--fetch-empty-scans` to override.
 - On HTTP 429 every worker pauses and honours `Retry-After`.
 - `Finding Key` includes the start line, so it changes when code above the finding changes. For a line-independent ID, use `Mitigation Key` (`--mitigations`).
+- **Only the latest scan per asset is exported by default.** `--since` / `--until` then keep the latest scans in that window; add `--all-scans` for every scan in a period. `--latest-only` is still accepted and does nothing extra.
 - First Seen / Last Seen / Seen In Scans only cover the scans fetched in that run.
 - The output file is replaced only when the run finishes; a failed run never leaves a partial file.
 
