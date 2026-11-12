@@ -45,7 +45,7 @@ jobs:
           VERACODE_API_KEY_ID: ${{ secrets.VERACODE_API_KEY_ID }}
           VERACODE_API_KEY_SECRET: ${{ secrets.VERACODE_API_KEY_SECRET }}
           EXTRA_ARGS: ${{ vars.VERACODE_EXTRACT_ARGS }}   # optional, e.g. --asset my-org/*
-        run: python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv $EXTRA_ARGS
+        run: python veracode_iac_extract.py --compact --mitigations veracode-findings.csv $EXTRA_ARGS
       - uses: actions/upload-artifact@v6
         if: always()
         with:
