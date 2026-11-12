@@ -1,0 +1,55 @@
+# Daily export of Veracode IaC / Container / Secrets findings with mitigations carried over.
+#
+#   Every day / Run workflow   reads veracode-findings.csv from the repo, exports the latest findings,
+#                              and attaches the refreshed veracode-findings.csv to the run
+#   Pull requests              validates the Mitigation columns of veracode-findings.csv
+#
+# Setup: add the repository secrets VERACODE_API_KEY_ID and VERACODE_API_KEY_SECRET. See MITIGATIONS.md.
+
+name: Veracode IaC findings
+
+on:
+  schedule:
+    - cron: "23 4 * * *"   # every day at 04:23 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "veracode-findings.csv"
+
+permissions:
+  contents: read
+
+jobs:
+  check-mitigations:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python veracode_iac_extract.py --check-mitigations veracode-findings.csv
+
+  export:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install requests veracode-api-signing veracode-api-py
+      - name: Export findings
+        env:
+          VERACODE_API_KEY_ID: ${{ secrets.VERACODE_API_KEY_ID }}
+          VERACODE_API_KEY_SECRET: ${{ secrets.VERACODE_API_KEY_SECRET }}
+          EXTRA_ARGS: ${{ vars.VERACODE_EXTRACT_ARGS }}   # optional, e.g. --asset my-org/*
+        run: python veracode_iac_extract.py --latest-only --compact --mitigations veracode-findings.csv $EXTRA_ARGS
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: veracode-findings
+          path: veracode-findings.csv
+          if-no-files-found: ignore
+          retention-days: 30
