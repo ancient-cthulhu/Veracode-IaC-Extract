@@ -3,7 +3,18 @@
 
 Pulls scans and findings from the Veracode Container Security query API
 (the same one the Platform UI uses), filters them, and writes a flat,
-developer-friendly CSV / JSON / JSONL export.
+developer-friendly CSV / JSON / JSONL / Excel export.
+
+Library use (no argparse, no sys.exit; the API is the names in __all__):
+
+    import veracode_iac_extract as vx
+    scans, rows, failures = vx.collect_latest(asset="my-org/*", workers=4, rps=2)
+
+collect_latest() reads the latest scan of every asset that passes the scan filters. It returns
+(a scan row for every scan in the tenant, the finding rows of the scans it read, the failed requests
+as (scope, detail) pairs). Rows use the export's column names. A scan row has "_read": True when its
+findings were read in full. Bad input raises ExtractError with exit_code 2; a failed token or scan
+list request raises ExtractError with exit_code 1.
 """
 
 from __future__ import annotations
@@ -29,6 +40,16 @@ from typing import Any, Callable, Iterable, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
+
+__version__ = "2.0.0"
+
+# Library API: stable for importers such as the findings tracker. Everything else is internal.
+__all__ = [
+    "__version__", "collect_latest", "ExtractError", "FetchError", "Client", "mint_principal_token",
+    "finding_row", "mitigation_key", "code_hash", "csv_safe", "read_csv_file", "write_output", "save_output",
+    "OutputLocked", "order_columns", "xlsx_too_big", "BASE_COLUMNS", "SEVERITY_RANK", "SEVERITY_LABEL",
+    "main", "map_credential_env",
+]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -149,6 +170,25 @@ class FetchError(Exception):
     pass
 
 
+class ExtractError(Exception):
+    """A library call could not run. exit_code 2: bad input; 1: Veracode could not be read."""
+
+    def __init__(self, message: str, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+CREDENTIAL_ALIASES = (("VERACODE_API_ID", "VERACODE_API_KEY_ID"), ("VERACODE_API_KEY", "VERACODE_API_KEY_SECRET"))
+
+
+def map_credential_env() -> None:
+    """VERACODE_API_ID / VERACODE_API_KEY are the standard names; the signing libraries read
+    VERACODE_API_KEY_ID / VERACODE_API_KEY_SECRET. Copy them over when only the standard ones are set."""
+    for std, lib in CREDENTIAL_ALIASES:
+        if os.environ.get(std) and not os.environ.get(lib):
+            os.environ[lib] = os.environ[std]
+
+
 class Tracker:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -221,6 +261,7 @@ class TokenProvider:
 
 def mint_principal_token() -> str:
     """Exchange HMAC credentials for a session token (region-aware via veracode_api_py)."""
+    map_credential_env()
     from veracode_api_py.apihelper import APIHelper
     try:
         principal = APIHelper()._rest_request("api/authn/v2/principal", "GET")
@@ -663,6 +704,7 @@ def fetch_scan_findings(client: "Client", tracker: Tracker, scan: dict) -> Optio
 def credential_region() -> str:
     """Region of the API key ID (env vars, else ~/.veracode/credentials and VERACODE_API_PROFILE).
     'global' when the credentials cannot be read; token minting reports that error."""
+    map_credential_env()
     try:
         from veracode_api_signing.credentials import get_credentials
         from veracode_api_signing.regions import get_region_for_api_credential
@@ -720,6 +762,90 @@ def load_app_index(ca_cert: Optional[str], tracker: Tracker, api_base: str = DEF
     finally:
         s.close()
     return index
+
+
+def _as_list(value: Any) -> Optional[list[str]]:
+    if value is None:
+        return None
+    return [value] if isinstance(value, str) else list(value)
+
+
+def collect_latest(base_url: Optional[str] = None, link_base: Optional[str] = None, *,
+                   asset: Any = None, exclude_asset: Any = None, scan_type: Any = None, asset_type: Any = None,
+                   scanned_by: Any = None, policy: Optional[str] = None, since: Optional[str] = None,
+                   until: Optional[str] = None, workers: int = 4, rps: float = 2.0, max_attempts: int = 6,
+                   timeout: int = 90, ca_cert: Optional[str] = None, minter: Optional[Callable[[], str]] = None,
+                   now: Optional[dt.datetime] = None, log: Optional[Callable[[str], Any]] = print,
+                   ) -> tuple[list[dict], list[dict], list[tuple[str, str]]]:
+    """Every finding of the latest scan per asset, for the findings tracker. Library call: no argparse, no exit.
+
+    base_url / link_base: None derives them from the credentials' region (give them for FedRAMP).
+    asset, exclude_asset, scan_type, asset_type, scanned_by: a pattern or a list of patterns, as the
+    --asset ... flags. policy: failed, passed or not-assessed. since / until: as --since / --until.
+    All scans are read (no severity-total skipping). log receives progress lines (None for quiet).
+
+    Returns (scans, finding_rows, failures):
+      scans         scan_row() of every scan in the tenant; "_read": True on the latest scans whose
+                    findings were read in full
+      finding_rows  finding_row() of every finding in those scans (Code Lines included)
+      failures      (scope, detail) of every failed request; not empty means the data is incomplete
+    Raises ExtractError (exit_code 2 for bad input, 1 when the token or the scan list cannot be read)."""
+    now = now or utcnow()
+    say = log or (lambda _msg: None)
+    if policy is not None and policy not in POLICY_VALUES:
+        raise ExtractError(f"policy must be one of {', '.join(POLICY_VALUES)}", 2)
+    if rps <= 0:
+        raise ExtractError("rps must be greater than 0", 2)
+    filters = argparse.Namespace(
+        asset=_as_list(asset), exclude_asset=_as_list(exclude_asset), scan_type=_as_list(scan_type),
+        asset_type=_as_list(asset_type), scanned_by=_as_list(scanned_by), policy=policy, library=None,
+        category=None, scan_id=None, finding_type=None, file=None, rule=None, finding_id=None, where=[],
+        since=since, until=until)
+    try:
+        clauses = build_clauses(filters)
+        start, end = parse_window(filters, now)
+    except (ValueError, re.error, argparse.ArgumentTypeError) as exc:
+        raise ExtractError(str(exc), 2) from None
+    if ca_cert and not os.path.isfile(ca_cert):
+        raise ExtractError(f"CA certificate not found: {ca_cert}", 2)
+    hosts = argparse.Namespace(base_url=base_url, link_base=link_base, api_base=None, match_apps=False)
+    endpoint_error = resolve_endpoints(hosts)
+    if endpoint_error:
+        raise ExtractError(endpoint_error, 2)
+
+    tracker = Tracker()
+    tokens = TokenProvider(minter or mint_principal_token)
+    try:
+        tokens.get()
+    except Exception as exc:
+        raise ExtractError(str(exc), 1) from exc
+    client = Client(hosts.base_url, tokens, RateLimiter(rps), tracker, ca_cert, max_attempts, timeout)
+    say("Fetching scan list...")
+    try:
+        raw = client.paginate(f"{client.base}/scans", "records", "scans")
+    except FetchError as exc:
+        raise ExtractError(str(exc), 1) from exc
+    latest = latest_scan_ids(raw)
+    scans = [scan_row(s, now, hosts.link_base, latest, {}) for s in raw]
+    picked = [(s, r) for s, r in zip(raw, scans) if in_window(s, start, end) and all(c.test(r) for c in clauses)]
+    keep_ids = latest_scan_ids([s for s, _ in picked])
+    picked = [(s, r) for s, r in picked if str(s.get("scan_id") or "") in keep_ids]
+    say(f"  {len(raw)} scans in tenant; reading the latest scan of {len(picked)} asset(s)")
+
+    rows: list[dict] = []
+    n = max(1, workers)
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        results = bounded_map(pool, lambda sr: fetch_scan_findings(client, tracker, sr[0]), picked, 2 * n)
+        for (scan, base), found in zip(picked, results):
+            if found is None:
+                continue
+            for rec in found:
+                try:
+                    rows.append(finding_row(rec, base))
+                except Exception as exc:
+                    tracker.fail(f"normalise[{base.get('Asset Name')}]", f"{type(exc).__name__}: {exc}")
+            base["_read"] = True
+    return scans, rows, list(tracker.failures)
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +909,10 @@ def save_output(path: str, *args: Any, **kwargs: Any) -> tuple[int, str, bool]:
 
 
 def write_output(path: str, fmt: str, columns: list[str], rows: Iterable[dict], raw_cells: bool,
-                 sheet: str = "Findings") -> int:
+                 sheet: str = "Findings", xlsx_style: Optional[dict[str, Any]] = None) -> int:
+    """Writes rows atomically as csv, json, jsonl or xlsx. xlsx_style (Excel only, optional):
+    {"wrap": columns to wrap, "dates": columns holding YYYY-MM-DD dates,
+     "fills": {column: {value: "RRGGBB"}} for bold, coloured cells}."""
     count = 0
     folder = os.path.dirname(os.path.abspath(path))
     os.makedirs(folder, exist_ok=True)
@@ -791,7 +920,7 @@ def write_output(path: str, fmt: str, columns: list[str], rows: Iterable[dict], 
     os.close(fd)
     try:
         if fmt == "xlsx":
-            count = write_xlsx(tmp, columns, rows, sheet)
+            count = write_xlsx(tmp, columns, rows, sheet, xlsx_style)
         elif fmt == "csv":
             with open(tmp, "w", newline="", encoding="utf-8-sig") as fh:
                 w = csv.writer(fh)
@@ -830,9 +959,7 @@ XLSX_MAX_ROWS = 1_048_576  # Excel sheet limit, header row included
 XLSX_SEVERITY_FILL = {"Critical": ("C00000", "FFFFFF"), "High": ("FF7C80", "000000"),
                       "Medium": ("FFC000", "000000"), "Low": ("A9D08E", "000000"),
                       "Negligible": ("D9D9D9", "000000"), "Unknown": ("D9D9D9", "000000")}
-XLSX_STATUS_FILL = {"Mitigated": "C6EFCE", "Expiring": "FFEB9C", "Expired": "F8CBAD"}
-XLSX_WRAP = {"Title", "Description", "Suggested Fix", "Mitigation Reason", "References"}
-XLSX_DATE_COLUMNS = {"Mitigation Expires"}
+XLSX_WRAP = {"Title", "Description", "Suggested Fix", "References"}
 
 
 def xlsx_too_big(fmt: str, rows: int) -> Optional[str]:
@@ -851,25 +978,33 @@ def require_openpyxl() -> Any:
     return openpyxl
 
 
-def xlsx_value(value: Any, column: str) -> Any:
+def xlsx_value(value: Any, column: str, date_columns: Iterable[str] = ()) -> Any:
     """Cell value for Excel: real dates in date columns, text that is never run as a formula."""
     from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     if value in (None, ""):
         return None
-    if column in XLSX_DATE_COLUMNS:
-        day, _ = parse_expiry(str(value)) if not isinstance(value, (dt.date, dt.datetime)) else (value, "")
-        if day:
-            return day
+    if column in date_columns:
+        if isinstance(value, (dt.date, dt.datetime)):
+            return value
+        try:
+            return dt.date.fromisoformat(str(value).strip()[:10])
+        except ValueError:
+            pass
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value
     return ILLEGAL_CHARACTERS_RE.sub("", str(value))[:32767]
 
 
-def write_xlsx(path: str, columns: list[str], rows: Iterable[dict], sheet: str) -> int:
+def write_xlsx(path: str, columns: list[str], rows: Iterable[dict], sheet: str,
+               style: Optional[dict[str, Any]] = None) -> int:
     openpyxl = require_openpyxl()
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
+    style = style or {}
+    wrap_cols = XLSX_WRAP | set(style.get("wrap") or ())
+    date_cols = set(style.get("dates") or ())
+    value_fills: dict[str, dict[str, str]] = style.get("fills") or {}
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = sheet
@@ -908,12 +1043,12 @@ def write_xlsx(path: str, columns: list[str], rows: Iterable[dict], sheet: str) 
             raise ValueError(f"more than {XLSX_MAX_ROWS - 1:,} rows do not fit in an Excel sheet; use CSV")
         for c, i in idx.items():
             raw = row.get(c, "")
-            value = xlsx_value(raw, c)
+            value = xlsx_value(raw, c, date_cols)
             cell = ws.cell(row=r, column=i, value=value)
             if isinstance(value, str) and value.startswith("="):
                 cell.data_type = "s"  # scanned content must never become a formula
             cell.font = body_font
-            cell.alignment = wrap if c in XLSX_WRAP else top
+            cell.alignment = wrap if c in wrap_cols else top
             if value is not None:
                 widths[c] = max(widths[c], min(len(str(raw)), 60))
             if c == "Veracode Link" and isinstance(value, str) and value.startswith("http"):
@@ -922,15 +1057,15 @@ def write_xlsx(path: str, columns: list[str], rows: Iterable[dict], sheet: str) 
             elif c == "Severity" and value in XLSX_SEVERITY_FILL:
                 bg, fg = XLSX_SEVERITY_FILL[value]
                 cell.fill, cell.font = fill(bg), font(bold=True, color=fg)
-            elif c == "Mitigation Status" and value in XLSX_STATUS_FILL:
-                cell.fill, cell.font = fill(XLSX_STATUS_FILL[value]), font(bold=True)
-            if c in XLSX_DATE_COLUMNS:
+            elif c in value_fills and isinstance(value, str) and value in value_fills[c]:
+                cell.fill, cell.font = fill(value_fills[c][value]), font(bold=True)
+            if c in date_cols:
                 cell.number_format = "yyyy-mm-dd"
 
     last_row = max(count + 1, 2)
     for c, i in idx.items():
         letter = get_column_letter(i)
-        ws.column_dimensions[letter].width = (min(widths[c], 50) if c in XLSX_WRAP else widths[c]) + 2
+        ws.column_dimensions[letter].width = (min(widths[c], 50) if c in wrap_cols else widths[c]) + 2
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{last_row}"
     ws.page_setup.orientation = "landscape"   # print: one page wide, header row on every page
@@ -957,24 +1092,12 @@ def order_columns(seen: Counter, base: list[str], keep_empty: bool, user_cols: O
 
 
 # ---------------------------------------------------------------------------
-# Finding identity and mitigation types
+# Finding identity (Finding Key)
 # ---------------------------------------------------------------------------
-# Mitigations for these findings are not available on the Veracode Platform. The tracker keeps
-# approved mitigations in mitigations.yml (see the Mitigation rules section below).
 
-MITIGATION_TYPES = {
-    "false-positive": "Not a real issue (Potential False Positive in Static Analysis).",
-    "by-design": "Deliberate and approved, or the design already handles it (Mitigate by Design).",
-    "network-environment": "A network control handles it: WAF, security group, private network.",
-    "os-environment": "The OS or runtime handles it: hardened host, read-only file system, no shell.",
-    "accept-risk": "The business accepts the risk for a limited time. Needs an expiry date.",
-}
-NOT_IN_EXPORT = "Not in export"  # status of carried-over rows in old tracking files (migration only)
-EXPIRY_WARN_DAYS = 30
 _RE_DIGEST = re.compile(r"@sha256:[0-9a-f]{16,}$", re.I)
 _RE_LINE_NO = re.compile(r"^\s*\d+\s*[:|]\s?", re.M)
 _RE_LINE_NO_LEGACY = re.compile(r"^\s*\d+\s*[:|]?\s?", re.M)  # also ate leading digits of the code itself
-_RE_MKEY = re.compile(r"^mk-[0-9a-f]{12}$")
 
 
 def stable_asset(name: Any, asset_type: Any) -> str:
@@ -1041,31 +1164,6 @@ def mitigation_key(row: dict[str, Any], legacy: bool = False) -> str:
     return "mk-" + hashlib.sha256("\x1f".join(parts).encode()).hexdigest()[:12]
 
 
-def parse_expiry(text: str) -> tuple[Optional[dt.date], str]:
-    """YYYY-MM-DD, or a date a spreadsheet rewrote (31/12/2027, 12/31/2027) when it is unambiguous."""
-    t = text.strip()
-    m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[ T].*)?", t)
-    if m:
-        y, mo, d = map(int, m.groups())
-    else:
-        m = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?: .*)?", t)
-        if not m:
-            return None, f"'{t}' is not a date. Use YYYY-MM-DD"
-        a, b, y = map(int, m.groups())
-        if a > 12 and b <= 12:
-            d, mo = a, b
-        elif b > 12 and a <= 12:
-            mo, d = a, b
-        elif a == b:
-            d = mo = a
-        else:
-            return None, f"'{t}' could be day/month or month/day. Use YYYY-MM-DD"
-    try:
-        return dt.date(y, mo, d), ""
-    except ValueError:
-        return None, f"'{t}' is not a valid date"
-
-
 def read_csv_file(path: str) -> list[dict[str, str]]:
     """Reads a CSV saved by this script or by Excel: UTF-8 or Windows encoding, comma or semicolon."""
     with open(path, "rb") as fh:
@@ -1081,1215 +1179,6 @@ def read_csv_file(path: str) -> list[dict[str, str]]:
         rows.append({k: (v[1:] if isinstance(v, str) and len(v) > 1 and v[0] == "'" and v[1] in "'=+-@\t\r"
                          else (v or "")) for k, v in r.items() if k is not None})
     return rows
-
-
-# ---------------------------------------------------------------------------
-# Findings tracker (--track DIR)
-# ---------------------------------------------------------------------------
-# DIR/findings.csv is the baseline: one row per open finding. DIR/fixed.csv logs the fixed ones.
-# A finding is identified by its Asset ID plus its Finding Key (line-independent, see mitigation_key),
-# so a moved line or a new image tag does not make it a new finding.
-
-NEW, OPEN, REOPENED, ASSET_MISSING = "New", "Open", "Reopened", "Asset Missing"
-ASSET_MISSING_DAYS = 30
-TRACK_MITIGATION_COLUMNS = ["Mitigation Status", "Mitigation Type", "Mitigation Reason", "Mitigation Approved By",
-                            "Mitigation Expires", "Mitigation Ref"]
-TRACK_COLUMNS = ["Status", "Severity", "Finding Type", "Finding ID", "Title", "Asset Name", "Location",
-                 "Fixed Versions", "First Seen", "Last Seen", "Days Open", *TRACK_MITIGATION_COLUMNS,
-                 "Veracode Link", "Asset ID", "Finding Key", "Mitigation ID", "File Path", "Scan Type", "Scan ID",
-                 "Scan Date", "Detected On", "Reopened On", "Asset Missing Since"]
-FIXED_COLUMNS = ["Fixed On", "Fixed Reason", "Days Open", "Severity", "Finding Type", "Finding ID", "Title",
-                 "Asset Name", "Location", "First Seen", "Last Seen", "Mitigation Status", "Mitigation ID",
-                 "Veracode Link", "Asset ID", "Finding Key", "Fixed By Scan"]
-TRACK_REJECTS = {"severity": "--severity", "min_severity": "--min-severity", "finding_type": "--type",
-                 "finding_id": "--id", "library": "--library", "file": "--file", "rule": "--rule",
-                 "category": "--category", "fixable": "--fixable", "min_cvss": "--cvss", "grep": "--search",
-                 "where": "--where", "all_scans": "--all-scans", "track_history": "--track-history",
-                 "scan_id": "--scan-id", "list_scans": "--list-scans", "columns": "--columns", "compact": "--compact",
-                 "summary_csv": "--summary-csv", "match_apps": "--match-apps"}
-
-
-def asset_key(asset_id: Any, name: Any) -> str:
-    aid = str(asset_id or "").strip()
-    return aid if aid else "name:" + str(name or "").strip().lower()
-
-
-def finding_ident(row: dict[str, Any]) -> tuple[str, str]:
-    return asset_key(row.get("Asset ID"), row.get("Asset Name")), str(row.get("Finding Key") or "")
-
-
-def severity_rank(label: Any) -> int:
-    return SEVERITY_RANK.get(str(label or "").strip().lower(), 0)
-
-
-def day_of(value: Any) -> Optional[dt.date]:
-    try:
-        return dt.date.fromisoformat(str(value or "")[:10])
-    except ValueError:
-        return None
-
-
-def tracker_row(row: dict[str, Any]) -> dict[str, Any]:
-    """The tracker's compact view of a finding_row."""
-    out = {c: row.get(c, "") for c in ("Severity", "Finding Type", "Finding ID", "Title", "Asset Name",
-                                       "Fixed Versions", "Veracode Link", "Asset ID", "Finding Key", "File Path",
-                                       "Scan Type", "Scan ID", "Scan Date")}
-    out["Location"] = row.get("Location") or ""
-    if str(row.get("Finding Type") or "").lower() == "vulnerability" and row.get("Library"):
-        out["Location"] = row["Library"]
-    out["_legacy"] = mitigation_key(row, legacy=True)
-    return out
-
-
-def sort_track_rows(rows: Iterable[dict]) -> list[dict]:
-    return sorted(rows, key=lambda r: (-severity_rank(r.get("Severity")), str(r.get("Asset Name") or "").lower(),
-                                       str(r.get("Finding Key") or ""), str(r.get("Asset ID") or "")))
-
-
-def fixed_entry(old: dict[str, Any], fixed_on: str, reason: str, scan_id: str = "") -> dict[str, Any]:
-    row = {c: old.get(c, "") for c in FIXED_COLUMNS}
-    first, fixed = day_of(old.get("First Seen")), day_of(fixed_on)
-    row.update({"Fixed On": fixed_on, "Fixed Reason": reason, "Fixed By Scan": scan_id,
-                "Days Open": (fixed - first).days if first and fixed else ""})
-    return row
-
-
-def update_lifecycle(baseline: list[dict], fixed_log: list[dict], current: list[dict],
-                     scanned: dict[tuple[str, str], tuple[str, str]], known_assets: set[str], today: dt.date,
-                     seed: Optional[dict[str, str]] = None) -> tuple[list[dict], list[dict], Counter]:
-    """Moves the baseline forward with this run's findings. Returns (open rows, newly fixed rows, counts).
-
-    scanned: (asset key, scan type) -> (scan date, scan ID) for every scan read in full in this run.
-    known_assets: asset keys of every scan in the tenant (to tell a deleted asset from a filtered one).
-    seed: Finding Key -> First Seen, from a migrated tracking file."""
-    today_s = today.isoformat()
-    prev = {finding_ident(r): r for r in baseline}
-    was_fixed = {finding_ident(r): r for r in fixed_log}
-    counts: Counter = Counter()
-    out: dict[tuple[str, str], dict] = {}
-    for cur in sorted(current, key=lambda r: -severity_rank(r.get("Severity"))):
-        ident = finding_ident(cur)
-        if ident in out:
-            continue
-        legacy = (ident[0], str(cur.get("_legacy") or ""))
-        old = prev.pop(ident, None)
-        if old is None and legacy[1] and legacy != ident:
-            old = prev.pop(legacy, None)  # baseline written before the code_hash fix
-        row = dict(cur)
-        seen = str(cur.get("Scan Date") or "")[:10] or today_s
-        row["Last Seen"] = seen
-        row["Asset Missing Since"] = ""
-        if old is not None:
-            for c in ("First Seen", "Detected On", "Reopened On"):
-                row[c] = old.get(c, "")
-            fresh = old.get("Status") in (NEW, REOPENED) and old.get("Detected On") == today_s
-            row["Status"] = old["Status"] if fresh else OPEN
-        elif ident in was_fixed or legacy in was_fixed:
-            gone = was_fixed.get(ident) or was_fixed[legacy]
-            row.update({"Status": REOPENED, "First Seen": gone.get("First Seen") or seen,
-                        "Reopened On": today_s, "Detected On": today_s})
-            counts["reopened"] += 1
-        elif seed and (ident[1] in seed or legacy[1] in seed):
-            row.update({"Status": OPEN, "First Seen": seed.get(ident[1]) or seed.get(legacy[1]) or seen,
-                        "Detected On": ""})
-            counts["seeded"] += 1
-        else:
-            row.update({"Status": NEW, "First Seen": seen, "Detected On": today_s})
-            counts["new"] += 1
-        out[ident] = row
-
-    fixed_rows: list[dict] = []
-    for ident, old in prev.items():
-        akey = ident[0]
-        stype = str(old.get("Scan Type") or "").lower()
-        if stype:
-            newer = scanned.get((akey, stype))
-        else:  # no scan type recorded: only when every scan read for the asset is newer
-            dates = [v for (a, _), v in scanned.items() if a == akey]
-            newer = min(dates) if dates else None
-        if newer and newer[0] > str(old.get("Scan Date") or ""):
-            fixed_rows.append(fixed_entry(old, newer[0][:10], "fixed", newer[1]))
-            counts["fixed"] += 1
-            continue
-        row = dict(old)
-        if akey not in known_assets:
-            since = old.get("Asset Missing Since") or today_s
-            since_day = day_of(since) or today
-            if (today - since_day).days >= ASSET_MISSING_DAYS:
-                fixed_rows.append(fixed_entry(old, today_s, "asset-removed"))
-                counts["removed"] += 1
-                continue
-            row["Status"], row["Asset Missing Since"] = ASSET_MISSING, since
-        elif row.get("Status") == ASSET_MISSING:
-            row["Status"], row["Asset Missing Since"] = OPEN, ""
-        elif row.get("Status") in (NEW, REOPENED) and row.get("Detected On") != today_s:
-            row["Status"] = OPEN
-        out[ident] = row
-    return sort_track_rows(out.values()), fixed_rows, counts
-
-
-def refresh_days_open(rows: list[dict], today: dt.date) -> None:
-    for row in rows:
-        first = day_of(row.get("First Seen"))
-        row["Days Open"] = (today - first).days if first else ""
-
-
-def track_paths(folder: str) -> dict[str, str]:
-    return {"findings": os.path.join(folder, "findings.csv"), "fixed": os.path.join(folder, "fixed.csv"),
-            "run": os.path.join(folder, "last-run.json")}
-
-
-def load_track_files(paths: dict[str, str]) -> tuple[list[dict], list[dict], Optional[str]]:
-    """(baseline, fixed log, error). Missing files are empty: the first run creates them."""
-    out = []
-    for name in ("findings", "fixed"):
-        path = paths[name]
-        rows: list[dict] = []
-        if os.path.exists(path):
-            try:
-                rows = read_csv_file(path)
-            except (OSError, csv.Error) as exc:
-                return [], [], f"cannot read {path}: {exc}"
-            if rows and "Finding Key" not in rows[0]:
-                return [], [], f"{path} has no Finding Key column; it was not written by --track"
-        out.append(rows)
-    return out[0], out[1], None
-
-
-def read_json_file(path: str) -> dict:
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def atomic_write_text(path: str, text: str) -> None:
-    folder = os.path.dirname(os.path.abspath(path))
-    os.makedirs(folder, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".iac_", suffix=".tmp", dir=folder)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-
-
-def github_output(**values: Any) -> None:
-    """Step outputs for GitHub Actions (only our own computed values, never user text)."""
-    path = os.environ.get("GITHUB_OUTPUT")
-    if path:
-        with open(path, "a", encoding="utf-8") as fh:
-            for k, v in values.items():
-                fh.write(f"{k}={v}\n")
-
-
-def step_summary(text: str) -> None:
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if path:
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(text + "\n")
-
-
-def merge_fixed(fixed_log: list[dict], new_rows: list[dict]) -> list[dict]:
-    seen = set()
-    out = []
-    for row in fixed_log + new_rows:
-        key = (str(row.get("Asset ID") or ""), str(row.get("Finding Key") or ""), str(row.get("Fixed On") or ""))
-        if key not in seen:
-            seen.add(key)
-            out.append(row)
-    return out
-
-
-def track_totals(rows: list[dict]) -> Counter:
-    c: Counter = Counter()
-    for r in rows:
-        ms = r.get("Mitigation Status") or ""
-        if ms in ("Mitigated", "Expiring"):
-            c["mitigated"] += 1
-        else:
-            c[str(r.get("Severity") or "Unknown")] += 1
-        if ms == "Expiring":
-            c["expiring"] += 1
-        if ms == "Expired":
-            c["expired"] += 1
-        if r.get("Status") in (NEW, REOPENED):
-            c["new today"] += 1
-    return c
-
-
-def write_track_outputs(paths: dict[str, str], rows: list[dict], fixed_all: list[dict]) -> Optional[str]:
-    """Writes findings.csv and fixed.csv (each atomically). Returns an error message or None."""
-    try:
-        write_output(paths["findings"], "csv", TRACK_COLUMNS, rows, raw_cells=False)
-        write_output(paths["fixed"], "csv", FIXED_COLUMNS, fixed_all, raw_cells=False)
-    except OutputLocked as exc:
-        os.remove(exc.path)
-        return f"{exc.target} is locked by another program"
-    except OSError as exc:
-        return f"cannot write the tracking files: {exc}"
-    return None
-
-
-def finish_track(args: argparse.Namespace, paths: dict[str, str], rows: list[dict], fixed_log: list[dict],
-                 fixed_new: list[dict], counts: Counter, run_info: dict, now: dt.datetime,
-                 rules: Optional["Rules"] = None, notes: Optional[list[str]] = None) -> int:
-    today = now.date()
-    for row in rows:
-        if rules:
-            rules.apply(row)
-        else:
-            clear_mitigation(row)
-    refresh_days_open(rows, today)
-    fixed_all = merge_fixed(fixed_log, fixed_new)
-    err = write_track_outputs(paths, rows, fixed_all)
-    if err:
-        print(f"error: {err}", file=sys.stderr)
-        return 1
-    run_info = dict(run_info, updated=now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-    atomic_write_text(paths["run"], json.dumps(run_info, indent=2, sort_keys=True) + "\n")
-    dashboard = args.dashboard or os.path.join(os.path.dirname(os.path.abspath(args.track)), "FINDINGS.md")
-    repo_url = resolve_repo_url(args.repo_url)
-    if args.repo_url and not repo_url:
-        print("  WARNING: --repo-url must look like https://github.com/<org>/<repo>; Mitigate links left out")
-    rel = os.path.relpath(os.path.abspath(args.track), os.path.dirname(os.path.abspath(dashboard)))
-    atomic_write_text(dashboard, render_dashboard(rows, fixed_all, run_info, now, repo_url, rel))
-    t = track_totals(rows)
-    sev = ", ".join(f"{SEVERITY_LABEL[r]} {t[SEVERITY_LABEL[r]]}" for r in (5, 4, 3, 2, 1, 0)
-                    if t[SEVERITY_LABEL[r]])
-    lines = [f"New {counts['new']}, reopened {counts['reopened']}, fixed {counts['fixed']}"
-             + (f", asset removed {counts['removed']}" if counts["removed"] else ""),
-             f"Open (not mitigated): {sev or 'none'}",
-             f"Mitigated {t['mitigated']}, expiring {t['expiring']}, expired {t['expired']}"]
-    print("\n" + "\n".join("  " + ln for ln in lines))
-    for msg in (notes or [])[:10]:
-        print(f"  NOTE: {msg}")
-    print(f"\nWrote {len(rows)} open finding(s) to {paths['findings']}")
-    step_summary("### Veracode findings tracker\n\n" + "\n".join(f"- {ln}" for ln in lines))
-    github_output(new=counts["new"], reopened=counts["reopened"], fixed=counts["fixed"] + counts["removed"],
-                  open=len(rows))
-    return 0
-
-
-def clear_mitigation(row: dict[str, Any]) -> None:
-    for c in TRACK_MITIGATION_COLUMNS + ["Mitigation ID"]:
-        row[c] = ""
-
-
-# FINDINGS.md: the dashboard GitHub shows next to the code. Every value is escaped with md_safe.
-DASHBOARD_LIMIT = 500_000
-DASHBOARD_ROWS = 300
-_RE_REPO_URL = re.compile(r"^https://[A-Za-z0-9.-]+(:\d+)?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-
-
-def resolve_repo_url(explicit: Optional[str]) -> str:
-    """https://github.com/<org>/<repo> from --repo-url or GitHub Actions; '' when unknown (no Mitigate links)."""
-    url = explicit or ""
-    if not url and os.environ.get("GITHUB_REPOSITORY"):
-        url = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/") + "/" + \
-            os.environ["GITHUB_REPOSITORY"]
-    url = url.strip().rstrip("/")
-    return url if _RE_REPO_URL.match(url) else ""
-
-
-def mitigate_url(repo_url: str, row: dict[str, Any]) -> str:
-    """Link to the mitigation request issue form, pre-filled with this finding."""
-    from urllib.parse import quote, urlencode
-    if not repo_url:
-        return ""
-    fid, asset = str(row.get("Finding ID") or ""), str(row.get("Asset Name") or "")
-    params = {"template": "mitigation.yml", "title": f"Mitigate: {fid} in {asset}"[:200],
-              "finding_key": row.get("Finding Key") or "", "finding_id": fid[:200], "asset": asset[:300]}
-    return f"{repo_url}/issues/new?{urlencode(params, quote_via=quote)}"
-
-
-def dashboard_table(columns: list[str], rows: list[dict], cell: Callable[[dict, str], str], budget: int,
-                    more_note: str) -> tuple[list[str], int]:
-    """Markdown table lines, at most DASHBOARD_ROWS rows and `budget` characters."""
-    if not rows:
-        return ["None."], 5
-    lines = ["| " + " | ".join(columns) + " |", "|" + " --- |" * len(columns)]
-    used = sum(len(x) + 1 for x in lines)
-    shown = 0
-    for r in rows[:DASHBOARD_ROWS]:
-        line = "| " + " | ".join(cell(r, c) for c in columns) + " |"
-        if used + len(line) + 1 > budget:
-            break
-        lines.append(line)
-        used += len(line) + 1
-        shown += 1
-    if shown < len(rows):
-        note = f"\n_Showing {shown} of {len(rows)}. {more_note}_"
-        lines.append(note)
-        used += len(note) + 1
-    return lines, used
-
-
-def render_dashboard(rows: list[dict], fixed_all: list[dict], run_info: dict, now: dt.datetime,
-                     repo_url: str, track_rel: str = "tracking") -> str:
-    track_rel = track_rel.replace("\\", "/").strip("/")
-    track_rel = track_rel if re.fullmatch(r"[A-Za-z0-9_./-]+", track_rel) else "tracking"
-    today = now.date()
-    t = track_totals(rows)
-    fixed_on = [(day_of(r.get("Fixed On")), r) for r in fixed_all]
-    recent = sorted(((d, r) for d, r in fixed_on if d and 0 <= (today - d).days <= 30),
-                    key=lambda dr: (dr[0], severity_rank(dr[1].get("Severity"))), reverse=True)
-    days = sorted(int(r["Days Open"]) for r in rows if str(r.get("Days Open", "")).lstrip("-").isdigit())
-    median = "" if not days else (days[len(days) // 2] if len(days) % 2 else
-                                  (days[len(days) // 2 - 1] + days[len(days) // 2]) / 2)
-    if isinstance(median, float) and median.is_integer():
-        median = int(median)
-    assets = run_info.get("assets", len({finding_ident(r)[0] for r in rows}))
-    last = "never (offline only)"
-    if run_info.get("run"):
-        last = (f"{str(run_info['run']).replace('T', ' ').rstrip('Z')} UTC, +{run_info.get('new', 0)} new, "
-                f"{run_info.get('reopened', 0)} reopened, -{int(run_info.get('fixed', 0)) + int(run_info.get('removed', 0))}"
-                " fixed")
-    out = ["# Veracode findings", "",
-           f"Last updated: {now.strftime('%Y-%m-%d %H:%M')} UTC · Assets tracked: {md_safe(assets)} · "
-           f"Last run: {md_safe(last)}", "",
-           "_Generated by the tracker workflow; do not edit. All open findings are in "
-           "[tracking/findings.csv](tracking/findings.csv), fixed ones in [tracking/fixed.csv](tracking/fixed.csv)._"
-           .replace("tracking/", track_rel + "/"),
-           "", "| Critical | High | Medium | Low | Mitigated | Expiring (≤30d) | Expired | New today | Fixed (7d) "
-           "| Fixed (30d) | Median days open |",
-           "|" + " --- |" * 11,
-           f"| {t['Critical']} | {t['High']} | {t['Medium']} | {t['Low']} | {t['mitigated']} | {t['expiring']} | "
-           f"{t['expired']} | {t['new today']} | {sum(1 for d, _ in recent if (today - d).days <= 7)} | "
-           f"{len(recent)} | {median} |", ""]
-    if not repo_url:
-        out += ["_Mitigate links are off: run in GitHub Actions or pass --repo-url._", ""]
-
-    def cell(r: dict, c: str) -> str:
-        if c == "Title":
-            return md_safe(r.get("Title"), 80)
-        if c == "Mitigation":
-            st = r.get("Mitigation Status") or ""
-            if not st:
-                return ""
-            ref = r.get("Mitigation Ref") or ""
-            mid = md_link(md_safe(r.get("Mitigation ID")), ref) or md_safe(r.get("Mitigation ID"))
-            return f"{md_safe(st)} ({md_safe(r.get('Mitigation Type'))}, {mid})"
-        if c == "Links":
-            links = [md_link("Veracode", r.get("Veracode Link"))]
-            if r.get("Mitigation Status") != "Mitigated":
-                links.append(md_link("Mitigate", mitigate_url(repo_url, r)))
-            return " ".join(x for x in links if x)
-        if c == "Asset":
-            return md_safe(r.get("Asset Name"), 120)
-        return md_safe(r.get(c), 160)
-
-    open_rows = [r for r in rows if r.get("Mitigation Status") not in ("Mitigated", "Expiring")]
-    sections = [
-        ("New since last run", ["Status", "Severity", "Finding ID", "Title", "Asset", "Location", "Days Open",
-                                "Mitigation", "Links"], [r for r in rows if r.get("Status") in (NEW, REOPENED)]),
-        ("Expiring or expired mitigations", ["Severity", "Finding ID", "Title", "Asset", "Mitigation Expires",
-                                             "Mitigation", "Links"],
-         [r for r in rows if r.get("Mitigation Status") in ("Expiring", "Expired")]),
-        ("Open findings", ["Severity", "Finding ID", "Title", "Asset", "Location", "Days Open", "Mitigation",
-                           "Links"], open_rows),
-        ("Fixed in the last 30 days", ["Fixed On", "Severity", "Finding ID", "Title", "Asset", "Location",
-                                       "Days Open", "Fixed Reason"], [r for _, r in recent]),
-    ]
-    used = sum(len(x) + 1 for x in out)
-    for i, (title, cols, srows) in enumerate(sections):
-        budget = (DASHBOARD_LIMIT - used - 2000) // (len(sections) - i)
-        lines, n = dashboard_table(cols, srows, cell, budget,
-                                   f"Full list in {track_rel}/" + ("fixed.csv" if i == 3 else "findings.csv") + ".")
-        out += [f"## {title} ({len(srows)})", ""] + lines + [""]
-        used += n + len(title) + 20
-    return "\n".join(out)
-
-
-def run_track(args: argparse.Namespace, now: dt.datetime, minter: Callable[[], str]) -> int:
-    paths = track_paths(args.track)
-    baseline, fixed_log, err = load_track_files(paths)
-    if err:
-        print(f"error: {err}", file=sys.stderr)
-        return 2
-    rules, notes = None, []
-    if args.mitigations:
-        rules, notes, rc = load_rules_for_run(args.mitigations, now.date())
-        if rules is None:
-            return rc
-    if args.offline:  # refresh the derived columns only; no Veracode access
-        return finish_track(args, paths, sort_track_rows(baseline), fixed_log, [], Counter(),
-                            read_json_file(paths["run"]), now, rules, notes)
-    bad = [flag for attr, flag in TRACK_REJECTS.items() if getattr(args, attr, None) not in (None, False, [])]
-    if bad:
-        print(f"error: --track cannot be combined with {', '.join(bad)}: findings filtered out would look fixed. "
-              "Use scan filters (--asset, --scan-type, --asset-type, ...) only", file=sys.stderr)
-        return 2
-    try:
-        clauses = build_clauses(args)
-        since, until = parse_window(args, now)
-    except (ValueError, re.error, argparse.ArgumentTypeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    if args.ca_cert and not os.path.isfile(args.ca_cert):
-        print(f"error: CA certificate not found: {args.ca_cert}", file=sys.stderr)
-        return 2
-    endpoint_error = resolve_endpoints(args)
-    if endpoint_error:
-        print(f"error: {endpoint_error}", file=sys.stderr)
-        return 2
-
-    tracker = Tracker()
-    tokens = TokenProvider(minter)
-    try:
-        tokens.get()
-    except Exception as exc:
-        print(f"error: {exc}\nNothing was changed.", file=sys.stderr)
-        return 1
-    client = Client(args.base_url, tokens, RateLimiter(args.rps), tracker, args.ca_cert, args.max_attempts,
-                    args.timeout)
-    print("Fetching scan list...")
-    try:
-        scans = client.paginate(f"{client.base}/scans", "records", "scans")
-    except FetchError as exc:
-        print(f"error: {exc}\nNothing was changed.", file=sys.stderr)
-        return 1
-    latest = latest_scan_ids(scans)
-    selected = [(s, r) for s, r in ((s, scan_row(s, now, args.link_base, latest, {})) for s in scans)
-                if in_window(s, since, until) and all(c.test(r) for c in clauses)]
-    keep_ids = latest_scan_ids([s for s, _ in selected])
-    selected = [(s, r) for s, r in selected if str(s.get("scan_id") or "") in keep_ids]
-    print(f"  {len(scans)} scans in tenant; reading the latest scan of {len(selected)} asset(s)")
-
-    current: list[dict] = []
-    full: list[dict] = []
-    scanned: dict[tuple[str, str], tuple[str, str]] = {}
-    workers = max(1, args.max_workers)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = bounded_map(pool, lambda sb: fetch_scan_findings(client, tracker, sb[0]), selected, 2 * workers)
-        for (scan, base), found in zip(selected, results):
-            if found is None:
-                continue
-            for raw in found:
-                try:
-                    fr = finding_row(raw, base)
-                    current.append(tracker_row(fr))
-                    if args.output:  # never the raw code: it can hold the secret itself
-                        full.append({k: v for k, v in fr.items() if k != "Code Lines"})
-                except Exception as exc:
-                    tracker.fail(f"normalise[{base.get('Asset Name')}]", f"{type(exc).__name__}: {exc}")
-            akey = asset_key(scan.get("asset_id"), scan.get("asset_name"))
-            scanned[(akey, str(scan.get("scan_type") or "").lower())] = (str(base.get("Scan Date") or ""),
-                                                                          str(scan.get("scan_id") or ""))
-    if tracker.failures:
-        print(f"\nINCOMPLETE: {len(tracker.failures)} failure(s):", file=sys.stderr)
-        for scope, detail in tracker.failures[:20]:
-            print(f"  - {scope}: {detail[:160]}", file=sys.stderr)
-        print("Nothing was changed: findings are never marked fixed from partial data.", file=sys.stderr)
-        return 1
-    known = {asset_key(s.get("asset_id"), s.get("asset_name")) for s in scans} | \
-        {asset_key("", s.get("asset_name")) for s in scans}
-    seed: Optional[dict[str, str]] = None
-    rules_path = args.mitigations or "mitigations.yml"
-    old_file = args.migrate or os.path.join(os.path.dirname(os.path.abspath(args.track)), OLD_TRACKING_FILE)
-    if args.migrate or (os.path.exists(old_file) and not os.path.exists(paths["findings"])):
-        seed, err = migrate_old_file(old_file, rules_path, now.date())
-        if err:
-            print(f"error: {err}\nNothing was changed.", file=sys.stderr)
-            return 2
-    if (args.mitigations and os.path.exists(rules_path) and remap_legacy_rules(rules_path, current)) \
-            or seed is not None:
-        rules, more, rc = load_rules_for_run(rules_path, now.date())
-        if rules is None:
-            return rc
-        notes = more
-    rows, fixed_new, counts = update_lifecycle(baseline, fixed_log, current, scanned, known, now.date(), seed)
-    run_info = {"run": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "assets": len({a for a, _ in scanned}),
-                **{k: counts[k] for k in ("new", "reopened", "fixed", "removed")}}
-    rc = finish_track(args, paths, rows, fixed_log, fixed_new, counts, run_info, now, rules, notes)
-    if rc == 0 and args.output:
-        rc = write_track_report(args, rows, full)
-    return rc
-
-
-def write_track_report(args: argparse.Namespace, rows: list[dict], full: list[dict]) -> int:
-    """-o with --track: every current finding with all its columns plus Status and Mitigation (no Code Lines)."""
-    by_ident = {finding_ident(r): r for r in rows}
-    seen: Counter = Counter()
-    for fr in full:
-        t = by_ident.get(finding_ident(fr), {})
-        for c in ["Status", "First Seen", "Last Seen"] + EXPORT_MITIGATION_COLUMNS:
-            fr[c] = t.get(c, "")
-        seen.update(k for k, v in fr.items() if v not in ("", None))
-    fmt = args.format or {".json": "json", ".jsonl": "jsonl", ".ndjson": "jsonl", ".xlsx": "xlsx"}.get(
-        os.path.splitext(args.output)[1].lower(), "csv")
-    too_big = xlsx_too_big(fmt, len(full))
-    if too_big:
-        print(f"error: {too_big}", file=sys.stderr)
-        return 2
-    base = ["Status", "Mitigation Status"] + [c for c in BASE_COLUMNS if c not in ("Code Lines", "Seen In Scans")] \
-        + EXPORT_MITIGATION_COLUMNS[1:]
-    columns = order_columns(seen, base, args.keep_empty_columns, None)
-    full.sort(key=lambda r: (-int(r.get("Severity Rank") or 0), str(r.get("Asset Name") or "").lower()))
-    n, path, locked = save_output(args.output, fmt, columns, full, args.no_csv_safe)
-    print(f"Wrote {n} finding(s) to {path}")
-    return 1 if locked else 0
-
-
-# ---------------------------------------------------------------------------
-# Mitigation rules (mitigations.yml)
-# ---------------------------------------------------------------------------
-# Approved mitigations live in mitigations.yml: a list of rules recorded by the approval workflow or
-# added through a pull request. A rule matches findings by Finding ID / CVE / Finding Key, optionally
-# narrowed to assets and files. Mitigations affect the tracker and exports only, not the Veracode Platform.
-
-RULE_FIELDS = ("id", "finding", "asset", "file", "type", "reason", "approved_by", "approved_on", "expires", "ref",
-               "requested_by", "notes", "allow_broad")
-RULE_REQUIRED = ("id", "finding", "type", "reason", "approved_by")
-RULE_PATTERNS = ("finding", "asset", "file")
-RULE_TEXT_MAX = 2000
-RULE_PATTERN_MAX = 300
-EXPORT_MITIGATION_COLUMNS = TRACK_MITIGATION_COLUMNS + ["Mitigation ID"]
-_RE_RULE_ID = re.compile(r"^M-(\d{4,})$")
-_RE_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_RE_UNPRINTABLE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff\ud800-\udfff]")
-_GLOBS: dict[str, Any] = {}
-
-
-def require_yaml() -> Any:
-    try:
-        import yaml
-    except ImportError:
-        raise SystemExit("mitigations.yml needs PyYAML: pip install PyYAML")
-    return yaml
-
-
-def glob_match(pattern: str, value: Any) -> bool:
-    """Whole-value match, case-insensitive. * is any text, ? one character; nothing else is special."""
-    rx = _GLOBS.get(pattern)
-    if rx is None:
-        rx = _GLOBS[pattern] = re.compile("".join(
-            ".*" if ch == "*" else "." if ch == "?" else re.escape(ch) for ch in pattern.strip()), re.I | re.S)
-    return bool(rx.fullmatch(str(value or "").strip()))
-
-
-def is_broad(pattern: str) -> bool:
-    return not pattern.replace("*", "").replace("?", "").strip()
-
-
-def rule_date(value: Any) -> tuple[Optional[dt.date], str]:
-    if isinstance(value, dt.datetime):
-        return value.date(), ""
-    if isinstance(value, dt.date):
-        return value, ""
-    text = str(value).strip()
-    if not _RE_ISO_DATE.match(text):
-        return None, f"'{text[:40]}' is not a date. Use YYYY-MM-DD"
-    try:
-        return dt.date.fromisoformat(text), ""
-    except ValueError:
-        return None, f"'{text}' is not a valid date"
-
-
-def validate_rules(data: Any, today: dt.date) -> tuple[list[dict], list[str], list[str]]:
-    """Normalises the parsed YAML. Returns (entries, errors, warnings). Every mapping that has an id is
-    returned (with _valid False when it has problems) so a diff can still show it."""
-    if data is None:
-        data = []
-    if not isinstance(data, list):
-        return [], ["the file must be a list of entries, each starting with '- id:'"], []
-    entries: list[dict] = []
-    errors: list[str] = []
-    warnings: list[str] = []
-    ids: dict[str, int] = {}
-    for n, item in enumerate(data, 1):
-        if not isinstance(item, dict):
-            errors.append(f"entry {n}: must be a mapping (id: ..., finding: ..., ...)")
-            continue
-        raw_id = item.get("id")
-        where = f"entry {n}" + (f" ({raw_id})" if isinstance(raw_id, str) and raw_id.strip() else "")
-        problems: list[str] = []
-        for key in item:
-            if key not in RULE_FIELDS:
-                problems.append(f"unknown key '{str(key)[:40]}'. Allowed: {', '.join(RULE_FIELDS)}")
-        e: dict[str, Any] = {"_n": n, "_where": where}
-        for f in RULE_FIELDS:
-            v = item.get(f)
-            if f == "allow_broad":
-                if v is not None and not isinstance(v, bool):
-                    problems.append("allow_broad must be true or false")
-                e[f] = v is True
-                continue
-            if v is None:
-                e[f] = ""
-            elif isinstance(v, (dt.date, dt.datetime)):
-                e[f] = (v.date() if isinstance(v, dt.datetime) else v).isoformat()
-            elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
-                e[f] = str(v).strip()
-            else:
-                problems.append(f"{f} must be text")
-                e[f] = ""
-            limit = RULE_PATTERN_MAX if f in RULE_PATTERNS or f in ("id", "approved_by", "requested_by", "ref") \
-                else RULE_TEXT_MAX
-            if len(e[f]) > limit:
-                problems.append(f"{f} is longer than {limit} characters")
-            if f in RULE_PATTERNS and ("\n" in e[f] or "\r" in e[f]):
-                problems.append(f"{f} must be one line")
-        for f in RULE_REQUIRED:
-            if not e[f]:
-                problems.append(f"{f} is required")
-        if e["id"]:
-            if not _RE_RULE_ID.match(e["id"]):
-                problems.append(f"id '{e['id'][:40]}' must look like M-0001")
-            elif e["id"] in ids:
-                problems.append(f"duplicate id {e['id']} (also entry {ids[e['id']]})")
-            else:
-                ids[e["id"]] = n
-        if e["type"] and e["type"] not in MITIGATION_TYPES:
-            problems.append(f"type '{e['type'][:40]}' must be one of {', '.join(MITIGATION_TYPES)}")
-        e["_expires"] = None
-        for f in ("expires", "approved_on"):
-            if e[f]:
-                day, err = rule_date(item.get(f))
-                if err:
-                    problems.append(f"{f}: {err}")
-                else:
-                    e[f] = day.isoformat()
-                    if f == "expires":
-                        e["_expires"] = day
-        if e["type"] == "accept-risk" and not e["expires"]:
-            problems.append("accept-risk needs expires (YYYY-MM-DD)")
-        if e["finding"] and is_broad(e["finding"]) and all(not e[f] or is_broad(e[f]) for f in ("asset", "file")) \
-                and not e["allow_broad"]:
-            problems.append("finding matches everything and there is no asset or file scope. Narrow it, or add "
-                            "allow_broad: true if this is intended")
-        if e["ref"].lower().startswith("http") and not e["ref"].startswith("https://"):
-            problems.append("ref must be an https:// link or plain text")
-        e["_valid"] = not problems
-        errors += [f"{where}: {p}" for p in problems]
-        if e["_expires"] and e["_expires"] < today and not problems:
-            warnings.append(f"{where}: expired on {e['_expires']}; the findings count as open again. "
-                            "Renew it or remove the entry")
-        entries.append(e)
-    return entries, errors, warnings
-
-
-def load_rules(path: str, today: dt.date) -> tuple[list[dict], list[str], list[str]]:
-    """Reads and validates mitigations.yml. A missing file is an empty list."""
-    if not os.path.exists(path):
-        return [], [], []
-    yaml = require_yaml()
-    try:
-        with open(path, encoding="utf-8-sig") as fh:
-            data = yaml.safe_load(fh)
-    except (OSError, UnicodeDecodeError) as exc:
-        return [], [f"cannot read {path}: {exc}"], []
-    except yaml.YAMLError as exc:
-        return [], [f"{path} is not valid YAML: {str(exc)[:300]}"], []
-    return validate_rules(data, today)
-
-
-class Rules:
-    def __init__(self, entries: list[dict], today: dt.date) -> None:
-        self.entries = [e for e in entries if e.get("_valid")]
-        self.today = today
-
-    def status(self, e: dict) -> str:
-        exp = e.get("_expires")
-        if exp and exp < self.today:
-            return "Expired"
-        if exp and (exp - self.today).days <= EXPIRY_WARN_DAYS:
-            return "Expiring"
-        return "Mitigated"
-
-    def match(self, row: dict[str, Any]) -> Optional[dict]:
-        """The first rule that matches and has not expired; else the first expired one."""
-        expired = None
-        for e in self.entries:
-            if rule_matches(e, row):
-                if self.status(e) != "Expired":
-                    return e
-                expired = expired or e
-        return expired
-
-    def apply(self, row: dict[str, Any]) -> str:
-        """Fills the Mitigation columns. Returns the Mitigation Status ('' when not mitigated)."""
-        e = self.match(row)
-        if e is None:
-            clear_mitigation(row)
-            return ""
-        st = self.status(e)
-        row.update({"Mitigation Status": st, "Mitigation Type": e["type"], "Mitigation Reason": e["reason"],
-                    "Mitigation Approved By": e["approved_by"], "Mitigation Expires": e["expires"],
-                    "Mitigation Ref": e["ref"] if e["ref"].startswith("https://") else e["id"],
-                    "Mitigation ID": e["id"]})
-        return st
-
-
-def rule_matches(e: dict, row: dict[str, Any]) -> bool:
-    if not any(glob_match(e["finding"], row.get(c)) for c in ("Finding ID", "Finding Key", "CVE ID", "_legacy")
-               if row.get(c)):
-        return False
-    if e["asset"] and not any(glob_match(e["asset"], row.get(c)) for c in ("Asset Name", "Asset ID")):
-        return False
-    if e["file"] and not any(glob_match(e["file"], row.get(c)) for c in ("File Path", "Location") if row.get(c)):
-        return False
-    return True
-
-
-def load_rules_for_run(path: str, today: dt.date, must_exist: bool = False) -> tuple[Optional[Rules], list[str], int]:
-    """(rules, warnings, exit code). rules is None when the run must stop."""
-    if must_exist and not os.path.exists(path):
-        print(f"error: {path} not found", file=sys.stderr)
-        return None, [], 2
-    try:
-        entries, errors, warnings = load_rules(path, today)
-    except SystemExit as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return None, [], 2
-    if errors:
-        for msg in errors:
-            print(f"error: {path} {msg}", file=sys.stderr)
-        print(f"Nothing was changed. Fix {path} (see --check-mitigations) and run again.", file=sys.stderr)
-        return None, [], 2
-    return Rules(entries, today), warnings, 0
-
-
-# Markdown for pull request comments, issue comments and FINDINGS.md. Everything that came from a
-# scan, a file or a person goes through md_safe: no HTML, no comments, no mentions, no table breaks.
-REPORT_LIMIT = 60_000
-_RE_MD_SPECIAL = re.compile(r"([\\`*_\[\]~|])")
-
-
-def md_safe(value: Any, limit: Optional[int] = None) -> str:
-    s = "" if value is None else str(value)
-    s = _RE_UNPRINTABLE.sub(" ", s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " "))
-    while "<!--" in s or "-->" in s:
-        s = s.replace("<!--", "").replace("-->", "")
-    if limit and len(s) > limit:
-        s = s[:limit - 1].rstrip() + "…"
-    s = html.escape(s, quote=False)
-    s = _RE_MD_SPECIAL.sub(r"\\\1", s)
-    return s.replace("@", "&#64;")
-
-
-def md_link(text: str, url: Any) -> str:
-    """[text](url) for https links only; the URL is percent-encoded so it cannot break the Markdown."""
-    u = str(url or "").strip()
-    if not u.startswith("https://"):
-        return ""
-    from urllib.parse import quote
-    return f"[{text}]({quote(u, safe=':/?#=&%~.-_+,;!$*')})"
-
-
-def severity_counts(rows: Iterable[dict]) -> str:
-    c = Counter(str(r.get("Severity") or "Unknown") for r in rows)
-    total = sum(c.values())
-    if not total:
-        return "0"
-    parts = ", ".join(f"{SEVERITY_LABEL[r]} {c[SEVERITY_LABEL[r]]}" for r in (5, 4, 3, 2, 1, 0)
-                      if c[SEVERITY_LABEL[r]])
-    return f"{total} ({parts})"
-
-
-DIFF_FIELDS = ("finding", "asset", "file", "type", "reason", "approved_by", "expires")
-OTHER_FIELDS = ("notes", "ref", "requested_by", "approved_on", "allow_broad")
-
-
-def rule_changes(base: list[dict], new: list[dict]) -> list[tuple[str, Optional[dict], Optional[dict]]]:
-    def key(e: dict) -> str:
-        return e["id"] or f"(entry {e['_n']})"
-    b = {key(e): e for e in base}
-    n = {key(e): e for e in new}
-    out: list[tuple[str, Optional[dict], Optional[dict]]] = []
-    for k, cur in n.items():
-        old = b.get(k)
-        if old is None:
-            out.append(("Added", None, cur))
-        elif any(old[f] != cur[f] for f in DIFF_FIELDS + OTHER_FIELDS):
-            out.append(("Changed", old, cur))
-    out += [("Removed", old, None) for k, old in b.items() if k not in n]
-    return out
-
-
-def rule_report(path: str, entries: list[dict], errors: list[str], warnings: list[str], base: list[dict],
-                baseline: Optional[list[dict]]) -> str:
-    """Markdown for the pull request comment, capped at REPORT_LIMIT characters."""
-    valid = sum(1 for e in entries if e["_valid"])
-    head = ["## Veracode mitigations", "",
-            f"**{md_safe(path)}: {len(errors)} problem(s). Fix them before merging.**" if errors
-            else f"**{md_safe(path)}: {valid} rule(s), all valid.**", "",
-            "### Changes compared with the base branch", ""]
-    changes = rule_changes(base, entries)
-    cols = ["Change", "ID", "Finding", "Asset", "File", "Type", "Reason", "Approved By", "Expires", "Other"]
-    if baseline is not None:
-        cols.append("Open findings matched")
-    rows: list[str] = []
-    for change, old, cur in changes:
-        e = cur or old
-        assert e is not None
-
-        def cell(f: str) -> str:
-            if change == "Changed" and old and cur and old[f] != cur[f]:
-                return f"~~{md_safe(old[f], 200) or '(empty)'}~~ {md_safe(cur[f], 200) or '(empty)'}"
-            return md_safe(e[f], 200)
-        other = []
-        for f in OTHER_FIELDS:
-            if change == "Changed" and old and cur and old[f] != cur[f]:
-                other.append(f"{f}: ~~{md_safe(old[f], 80) or '(empty)'}~~ {md_safe(cur[f], 80) or '(empty)'}")
-            elif change == "Added" and e[f] not in ("", False):
-                other.append(f"{f}: {md_safe(e[f], 80)}")
-        cells = [change, md_safe(e["id"] or "(no id)", 40)] + [cell(f) for f in DIFF_FIELDS] + ["; ".join(other)]
-        if baseline is not None:
-            cells.append(severity_counts(r for r in baseline if rule_matches(e, r)) if cur and cur["finding"]
-                         else "")
-        rows.append("| " + " | ".join(cells) + " |")
-    tail: list[str] = []
-    if errors:
-        tail += ["", "### Problems", ""] + [f"- {md_safe(m, 500)}" for m in errors[:200]]
-        if len(errors) > 200:
-            tail.append(f"- ...and {len(errors) - 200} more")
-    if warnings:
-        tail += ["", "### Warnings", ""] + [f"- {md_safe(m, 500)}" for m in warnings[:100]]
-    tail_text = "\n".join(tail)[:REPORT_LIMIT // 3]
-    budget = REPORT_LIMIT - len(tail_text) - 500
-    body: list[str] = []
-    if rows:
-        body = ["| " + " | ".join(cols) + " |", "|" + " --- |" * len(cols)]
-        used = sum(len(x) + 1 for x in head + body)
-        for i, r in enumerate(rows):
-            if used + len(r) + 1 > budget:
-                body.append(f"\n_{len(rows) - i} more change(s) not shown. Run --check-mitigations locally "
-                            "for the full list._")
-                break
-            body.append(r)
-            used += len(r) + 1
-    else:
-        body = ["No mitigation changes."]
-    return ("\n".join(head + body) + "\n" + tail_text + "\n")[:REPORT_LIMIT]
-
-
-def check_mitigations(path: str, against: Optional[str] = None, track_dir: Optional[str] = None) -> int:
-    """--check-mitigations: validate mitigations.yml and list its rules. No Veracode access.
-    With --against BASE: Markdown of the rules added, changed or removed, for a pull request comment.
-    With --track DIR: also how many open findings in DIR/findings.csv each added or changed rule matches."""
-    if not os.path.exists(path):
-        print(f"error: {path} not found", file=sys.stderr)
-        return 2
-    today = utcnow().date()
-    try:
-        entries, errors, warnings = load_rules(path, today)
-    except SystemExit as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    if against is not None:
-        base: list[dict] = []
-        if os.path.exists(against) and os.path.getsize(against):
-            base, _, _ = load_rules(against, today)
-        baseline = None
-        if track_dir:
-            fpath = track_paths(track_dir)["findings"]
-            baseline = read_csv_file(fpath) if os.path.exists(fpath) else []
-        print(rule_report(path, entries, errors, warnings, base, baseline))
-        return 2 if errors else 0
-    for e in entries:
-        if not e["_valid"]:
-            continue
-        scope = "".join(f", {f} {e[f]}" for f in ("asset", "file") if e[f])
-        extra = f", expires {e['expires']}" if e["expires"] else ""
-        print(f"OK       {e['id']} {e['finding']}{scope}: {e['type']}, approved by {e['approved_by']}{extra}. "
-              f"{e['reason']}")
-    for msg in errors:
-        print(f"ERROR    {msg}")
-    for msg in warnings:
-        print(f"WARNING  {msg}")
-    if errors:
-        print(f"\n{path}: {len(errors)} problem(s). Fix them before merging.")
-        return 2
-    print(f"{path}: {sum(1 for e in entries if e['_valid'])} rule(s), all valid.")
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Approving a mitigation request issue (--approve-issue)
-# ---------------------------------------------------------------------------
-# The approval workflow passes the issue (as JSON in a file, never through the shell) when an
-# approver adds the `approved` label. The issue body is the Markdown GitHub renders from the issue
-# form: "### <field label>" followed by the value.
-
-ISSUE_FORM_FIELDS = {"Finding Key": "finding_key", "Finding ID": "finding_id", "Asset": "asset", "File": "file",
-                     "Type": "type", "Reason": "reason", "Expires": "expires", "Notes / ticket": "notes"}
-NO_RESPONSE = "_No response_"
-NOT_APPROVER = 3  # exit code: the person who added the label is not in MITIGATION_APPROVERS
-MITIGATIONS_HEADER = ("# Approved mitigations for the Veracode findings tracker. See docs/MITIGATIONS.md.\n"
-                      "# The approval workflow appends entries here; you can also add or remove them in a pull "
-                      "request.\n")
-_RE_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$")
-_RE_ISSUE_URL = re.compile(r"^https://[^\s/]+/[^\s/]+/[^\s/]+/issues/\d+$")
-
-
-def parse_issue_form(body: Any) -> tuple[dict[str, str], list[str]]:
-    """Issue-form Markdown -> {field id: value}. A field heading that appears twice is an error (someone
-    typed '### Type' inside another answer)."""
-    text = str(body or "").replace("\x0d\n", "\n").replace("\x0d", "\n")
-    values: dict[str, str] = {}
-    errors: list[str] = []
-    current: Optional[str] = None
-    buf: list[str] = []
-
-    def flush() -> None:
-        if current is not None and current not in values:
-            value = "\n".join(buf).strip()
-            values[current] = "" if value == NO_RESPONSE else value
-
-    for line in text.split("\n"):
-        hit = re.fullmatch(r"###[ \t]+(.+?)[ \t]*", line)
-        if hit and hit.group(1) in ISSUE_FORM_FIELDS:
-            flush()
-            current, buf = ISSUE_FORM_FIELDS[hit.group(1)], []
-            if current in values:
-                errors.append(f"the section '{hit.group(1)}' appears more than once")
-            continue
-        if current is not None:
-            buf.append(line)
-    flush()
-    return values, errors
-
-
-def parse_approvers(text: Optional[str]) -> set[str]:
-    return {x.lstrip("@").lower() for x in re.split(r"[\s,]+", text or "") if x.strip().lstrip("@")}
-
-
-def next_rule_id(entries: list[dict]) -> str:
-    nums = [int(mt.group(1)) for e in entries if (mt := _RE_RULE_ID.match(str(e.get("id") or "")))]
-    return f"M-{max(nums, default=0) + 1:04d}"
-
-
-def yaml_value(v: Any) -> str:
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, dt.date):
-        return v.isoformat()
-    return json.dumps(_RE_UNPRINTABLE.sub(" ", str(v)), ensure_ascii=False)  # a JSON string is valid YAML
-
-
-def render_rule(entry: dict[str, Any]) -> str:
-    lines = [f"- id: {entry['id']}"]
-    for k in RULE_FIELDS[1:]:
-        v = entry.get(k)
-        if v not in (None, "", False):
-            lines.append(f"  {k}: {v if k == 'type' else yaml_value(v)}")
-    return "\n".join(lines) + "\n"
-
-
-def append_rules(path: str, new: list[dict[str, Any]], today: dt.date) -> Optional[str]:
-    """Appends entries to mitigations.yml as text (comments and layout stay) and writes it atomically.
-    Returns an error message, or None."""
-    yaml = require_yaml()
-    text = MITIGATIONS_HEADER
-    if os.path.exists(path):
-        with open(path, encoding="utf-8-sig") as fh:
-            text = fh.read()
-    try:
-        current = yaml.safe_load(text) or []
-    except yaml.YAMLError as exc:
-        return f"{path} is not valid YAML: {str(exc)[:200]}"
-    if not current:  # "[]" (the template's empty list) cannot be followed by block entries
-        text = re.sub(r"(?m)^[ \t]*\[[ \t]*\][ \t]*(#.*)?$\n?", "", text)
-    if text and not text.endswith("\n"):
-        text += "\n"
-    text += "".join(render_rule(e) for e in new)
-    try:
-        entries, errors, _ = validate_rules(yaml.safe_load(text), today)
-    except yaml.YAMLError as exc:
-        return f"{path} could not be extended ({str(exc)[:200]}). Rewrite it as a block list ('- id: ...')"
-    tail = entries[-len(new):] if new else []
-    if errors or len(tail) != len(new) or any(
-            got[k] != str(want.get(k) or "") for got, want in zip(tail, new)
-            for k in ("id", "finding", "asset", "file", "reason", "approved_by", "notes", "ref")):
-        return f"{path} could not be extended safely: " + "; ".join(errors[:5])
-    atomic_write_text(path, text)
-    return None
-
-
-def approve_issue(issue_path: str, rules_path: str, approver: Optional[str], approvers: Optional[str],
-                  today: dt.date, track_dir: Optional[str] = None) -> int:
-    """--approve-issue: turn an approved mitigation request issue into a mitigations.yml entry.
-    Exit 0 recorded (or already recorded), 2 invalid request, 3 not an approver."""
-    def fail(msgs: list[str], code: int = 2) -> int:
-        for msg in msgs:  # the workflow posts these on the issue: keep them Markdown-safe
-            print(f"- {md_safe(msg, 500)}", file=sys.stderr)
-        return code
-
-    login = (approver or "").strip()
-    if not _RE_LOGIN.match(login):
-        return fail(["--approver must be the GitHub login of the person who added the label"])
-    allowed = parse_approvers(approvers)
-    if not allowed:
-        return fail(["the repository variable MITIGATION_APPROVERS is empty, so nobody can approve"], NOT_APPROVER)
-    if login.lower() not in allowed:
-        return fail([f"{login} is not an approver (repository variable MITIGATION_APPROVERS)"], NOT_APPROVER)
-    try:
-        with open(issue_path, encoding="utf-8") as fh:
-            issue = json.load(fh)
-    except (OSError, ValueError) as exc:
-        return fail([f"cannot read the issue JSON: {exc}"])
-    if not isinstance(issue, dict):
-        return fail(["the issue JSON must be an object"])
-    if str(issue.get("state") or "open").lower() != "open":
-        return fail(["the issue is closed; reopen it to approve"])
-    url = str(issue.get("url") or "")
-    if not _RE_ISSUE_URL.match(url):
-        return fail(["the issue JSON has no valid url"])
-    author = issue.get("author") if isinstance(issue.get("author"), dict) else {}
-    requested_by = str(author.get("login") or "")
-    try:
-        entries, errors, _ = load_rules(rules_path, today)
-    except SystemExit as exc:
-        return fail([str(exc)])
-    if errors:
-        return fail([f"{rules_path} has problems; fix them first:"] + errors[:20])
-    done = next((e for e in entries if e["ref"] == url), None)
-    if done:
-        print(f"Already recorded as {done['id']}")
-        github_output(id=done["id"], matches=count_matches(done, track_dir))
-        return 0
-
-    fields, problems = parse_issue_form(issue.get("body"))
-    f = {k: _RE_UNPRINTABLE.sub(" ", fields.get(k, "")).strip() for k in ISSUE_FORM_FIELDS.values()}
-    key = f["finding_key"].lower()
-    if not _RE_MKEY.match(key):
-        problems.append("Finding Key must look like mk-0123456789ab (use the Mitigate link in FINDINGS.md)")
-    for k in ("finding_key", "finding_id", "asset", "file", "expires"):
-        if "\n" in f[k]:
-            problems.append(f"{k.replace('_', ' ')} must be one line")
-    wider = any(ch in f["asset"] for ch in "*?") or bool(f["file"])
-    if wider and not f["finding_id"]:
-        problems.append("Finding ID is required when Asset has a wildcard or File is set")
-    mtype = (f["type"].split() or [""])[0].lower()
-    if f["expires"]:
-        day, err = rule_date(f["expires"])
-        if err:
-            problems.append(f"Expires: {err}")
-        elif day and day < today:
-            problems.append(f"Expires: {day} is in the past")
-    entry = {"id": next_rule_id(entries), "finding": f["finding_id"] if wider else key, "asset": f["asset"],
-             "file": f["file"], "type": mtype, "reason": f["reason"], "approved_by": login, "approved_on": today,
-             "expires": f["expires"], "ref": url, "requested_by": requested_by, "notes": f["notes"]}
-    _, errs, _ = validate_rules([{k: v for k, v in entry.items() if v not in ("", None)}], today)
-    problems += [e.split(": ", 1)[1] for e in errs]
-    if problems:
-        return fail(problems)
-    err = append_rules(rules_path, [entry], today)
-    if err:
-        return fail([err])
-    n = count_matches(entry, track_dir)
-    print(f"Approved as {entry['id']}, applied to {n} finding(s)")
-    github_output(id=entry["id"], matches=n)
-    return 0
-
-
-def count_matches(entry: dict[str, Any], track_dir: Optional[str]) -> int:
-    """Open findings in DIR/findings.csv that the rule matches (0 without a baseline)."""
-    if not track_dir:
-        return 0
-    path = track_paths(track_dir)["findings"]
-    if not os.path.exists(path):
-        return 0
-    e = {k: str(entry.get(k) or "") for k in RULE_PATTERNS}
-    return sum(1 for r in read_csv_file(path) if rule_matches(e, r))
-
-
-# ---------------------------------------------------------------------------
-# Migration from the old tracking CSV (veracode-findings.csv, --mitigations FILE.csv in older versions)
-# ---------------------------------------------------------------------------
-
-OLD_TRACKING_FILE = "veracode-findings.csv"
-
-
-def migrate_old_file(path: str, rules_path: str, today: dt.date) -> tuple[Optional[dict[str, str]], Optional[str]]:
-    """Turns every mitigated row of an old tracking CSV into a mitigations.yml entry (finding = its key,
-    ref 'migrated') and returns {Finding Key: First Seen} to seed the baseline. Running it twice adds nothing.
-    Returns (seed, error)."""
-    if not os.path.exists(path):
-        return None, f"{path} not found"
-    try:
-        old = read_csv_file(path)
-    except (OSError, csv.Error) as exc:
-        return None, f"cannot read {path}: {exc}"
-    if old and "Mitigation Key" not in old[0]:
-        return None, f"{path} has no Mitigation Key column; it is not an old tracking file"
-    try:
-        entries, errors, _ = load_rules(rules_path, today)
-    except SystemExit as exc:
-        return None, str(exc)
-    if errors:
-        return None, f"{rules_path} has problems; fix them first: " + "; ".join(errors[:5])
-    done = {e["finding"].lower() for e in entries if e["ref"] == "migrated"}
-    seed: dict[str, str] = {}
-    new: list[dict[str, Any]] = []
-    problems: list[str] = []
-    next_n = int(next_rule_id(entries)[2:])
-    for line, row in enumerate(old, 2):
-        key = str(row.get("Mitigation Key") or "").strip().lower()
-        valid_key = bool(_RE_MKEY.match(key))
-        if valid_key and row.get("Mitigation Status") != NOT_IN_EXPORT:
-            first = day_of(row.get("First Seen") or row.get("Scan Date"))
-            seed[key] = first.isoformat() if first else ""
-        mtype = str(row.get("Mitigation Type") or "").strip().lower()
-        if not mtype:
-            continue
-        where = f"{path} row {line} ({row.get('Finding ID') or key or '?'})"
-        if not valid_key:
-            problems.append(f"{where}: Mitigation Key is missing or changed")
-            continue
-        if key in done:
-            continue
-        expires = str(row.get("Mitigation Expires") or "").strip()
-        if expires:
-            day, err = parse_expiry(expires)
-            if err:
-                problems.append(f"{where}: Mitigation Expires: {err}")
-                continue
-            expires = day.isoformat() if day else ""
-        entry = {"id": f"M-{next_n:04d}", "finding": key, "type": mtype,
-                 "reason": str(row.get("Mitigation Reason") or "").strip(),
-                 "approved_by": str(row.get("Mitigation Approved By") or "").strip(), "expires": expires,
-                 "notes": str(row.get("Mitigation Notes") or "").strip(), "ref": "migrated"}
-        _, errs, _ = validate_rules([{k: v for k, v in entry.items() if v}], today)
-        if errs:
-            problems += [f"{where}: {e.split(': ', 1)[1]}" for e in errs]
-            continue
-        new.append(entry)
-        done.add(key)
-        next_n += 1
-    if problems:
-        return None, "cannot migrate the old tracking file:\n  " + "\n  ".join(problems[:50])
-    if new:
-        err = append_rules(rules_path, new, today)
-        if err:
-            return None, err
-    print(f"Migrated {len(new)} mitigation(s) from {path} to {rules_path}"
-          + (f" ({new[0]['id']} to {new[-1]['id']})" if new else "")
-          + f"; {len(seed)} finding(s) keep their First Seen. {path} is no longer used and can be deleted.")
-    return seed, None
-
-
-def remap_legacy_rules(rules_path: str, current: list[dict]) -> bool:
-    """Rules written with a Finding Key from before the code_hash fix get the current key. True if changed."""
-    legacy = {str(r.get("_legacy")): str(r.get("Finding Key")) for r in current
-              if r.get("_legacy") and r.get("_legacy") != r.get("Finding Key")}
-    if not legacy:
-        return False
-    with open(rules_path, encoding="utf-8-sig") as fh:
-        text = fh.read()
-    changed = text
-    for old, new in legacy.items():
-        changed = re.sub(rf"(?i)\b{re.escape(old)}\b", new, changed)
-    if changed == text:
-        return False
-    atomic_write_text(rules_path, changed)
-    print(f"Updated old Finding Keys in {rules_path} to the current ones")
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -2376,43 +1265,6 @@ examples:
 
     g = p.add_argument_group("modes")
     g.add_argument("--list-scans", action="store_true", help="Export the scan inventory only, no findings.")
-
-    g = p.add_argument_group("findings tracker (see README.md)")
-    g.add_argument("--track", metavar="DIR",
-                   help="Update the findings baseline in DIR (findings.csv, fixed.csv): New, Open, Reopened and "
-                        "Fixed findings of the latest scan per asset. Scan filters apply; finding filters are "
-                        "refused. Any failed request changes nothing (exit 1).")
-    g.add_argument("--offline", action="store_true",
-                   help="With --track: refresh Days Open and the Mitigation columns from the existing baseline, "
-                        "without calling Veracode.")
-    g.add_argument("--dashboard", metavar="FILE",
-                   help="With --track: where to write the Markdown dashboard (default FINDINGS.md next to DIR).")
-    g.add_argument("--repo-url", metavar="URL",
-                   help="With --track: https://github.com/<org>/<repo>, for the Mitigate links in the dashboard. "
-                        "Default: from GITHUB_SERVER_URL and GITHUB_REPOSITORY in GitHub Actions.")
-    g.add_argument("--migrate", metavar="OLD_CSV",
-                   help="With --track: copy the mitigations of an old tracking CSV (veracode-findings.csv) into "
-                        "--mitigations and keep its First Seen dates. Done automatically on the first run when "
-                        f"{OLD_TRACKING_FILE} sits next to DIR.")
-
-    g = p.add_argument_group("mitigations (see docs/MITIGATIONS.md)")
-    g.add_argument("--mitigations", metavar="FILE",
-                   help="Mitigation rules file (mitigations.yml). Adds the Mitigation columns (Status, Type, "
-                        "Reason, Approved By, Expires, Ref) to an export or to --track.")
-    g.add_argument("--check-mitigations", metavar="FILE",
-                   help="Validate and list the rules in this mitigations.yml, then exit (0 valid, 2 invalid). "
-                        "No Veracode access needed.")
-    g.add_argument("--against", metavar="BASE",
-                   help="With --check-mitigations: print Markdown of the rules added, changed or removed compared "
-                        "with BASE (for pull requests). Add --track DIR to show how many open findings in "
-                        "DIR/findings.csv each rule matches.")
-    g.add_argument("--approve-issue", metavar="ISSUE_JSON",
-                   help="Record an approved mitigation request: read the issue (JSON with number, title, body, "
-                        "url, author, from the approval workflow), validate it and append the next M-NNNN entry "
-                        "to --mitigations. Exit 2 if invalid, 3 if --approver is not in MITIGATION_APPROVERS.")
-    g.add_argument("--approver", metavar="LOGIN",
-                   help="With --approve-issue: GitHub login that added the approved label. Must be listed in the "
-                        "MITIGATION_APPROVERS environment variable (comma or space separated).")
 
     g = p.add_argument_group("connection")
     g.add_argument("--max-workers", type=int, default=4, help="Concurrent requests (default 4).")
@@ -2532,29 +1384,8 @@ def utcnow() -> dt.datetime:
 
 def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_principal_token) -> int:
     args = parse_args(argv)
+    map_credential_env()
     now = utcnow()
-    if args.offline and not args.track:
-        print("error: --offline needs --track DIR", file=sys.stderr)
-        return 2
-    if args.against and not args.check_mitigations:
-        print("error: --against needs --check-mitigations FILE", file=sys.stderr)
-        return 2
-    if args.check_mitigations:
-        return check_mitigations(args.check_mitigations, args.against, args.track)
-    if args.approve_issue:
-        if not args.mitigations:
-            print("error: --approve-issue needs --mitigations FILE", file=sys.stderr)
-            return 2
-        return approve_issue(args.approve_issue, args.mitigations, args.approver,
-                             os.environ.get("MITIGATION_APPROVERS"), now.date(), args.track)
-    if args.track:
-        return run_track(args, now, minter)
-    rules: Optional[Rules] = None
-    mitigation_notes: list[str] = []
-    if args.mitigations:
-        rules, mitigation_notes, rc = load_rules_for_run(args.mitigations, now.date(), must_exist=True)
-        if rules is None:
-            return rc
     args.output = args.output or "veracode_iac_findings.csv"
     try:
         clauses = build_clauses(args)
@@ -2586,10 +1417,7 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
     user_cols = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
     if args.compact and not user_cols and not args.list_scans:
         user_cols = list(COMPACT_COLUMNS)
-        if rules:
-            user_cols = ["Mitigation Status"] + user_cols + EXPORT_MITIGATION_COLUMNS[1:]
-    finding_base = (["Mitigation Status"] + BASE_COLUMNS + EXPORT_MITIGATION_COLUMNS[1:]) if rules else BASE_COLUMNS
-    mit_status: Counter = Counter()
+    finding_base = BASE_COLUMNS
     if user_cols:  # catch typos before any request; 'Scan: x' / 'Finding: x' are checked once the data is in
         listing = SCAN_INVENTORY_COLUMNS + APP_COLUMNS if args.list_scans else finding_base
         dynamic = ("scan:",) if args.list_scans else ("scan:", "finding:")
@@ -2744,8 +1572,6 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
                         continue
                     if args.no_extra_columns:
                         row = {k: v for k, v in row.items() if not k.startswith("Finding: ")}
-                    if rules:
-                        rules.apply(row)  # before filters, so --where "Mitigation Status=..." works
                     if ranks is not None and row["Severity Rank"] not in ranks:
                         continue
                     if not all(c.test(row) for c in finding_clauses):
@@ -2770,8 +1596,6 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
                         h[2] += 1
                     if args.track_history and not is_latest:
                         continue
-                    if rules:
-                        mit_status[row["Mitigation Status"] or "Not mitigated"] += 1
                     spool.write(json.dumps(row, ensure_ascii=False) + "\n")
                     kept += 1
                     seen_cols.update(k for k, v in row.items() if v not in ("", None))
@@ -2792,9 +1616,6 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
                     a["Type: " + (row["Finding Type"] or "(none)")] += 1
                     a["scan:" + str(row.get("Scan ID", ""))] = 1
         spool.flush()
-        if rules:
-            for col in EXPORT_MITIGATION_COLUMNS:
-                seen_cols[col] += 1
 
         for col in ("First Seen", "Last Seen", "Seen In Scans"):
             seen_cols[col] = kept
@@ -2858,13 +1679,6 @@ def main(argv: Optional[list[str]] = None, minter: Callable[[], str] = mint_prin
         print(f"  Fix available      : {fixable}")
     if args.summary_csv:
         print(f"  Per-asset rollup   : {summary_path}")
-    if rules:
-        print("  Mitigation status  : " + ", ".join(
-            f"{k} {mit_status[k]}" for k in ("Not mitigated", "Mitigated", "Expiring", "Expired")))
-        for msg in mitigation_notes[:10]:
-            print(f"  NOTE: {msg}")
-        if len(mitigation_notes) > 10:
-            print(f"  NOTE: ...and {len(mitigation_notes) - 10} more (run --check-mitigations)")
     if tokens.refreshes:
         print(f"  Token refreshes    : {tokens.refreshes}")
     for c in clauses:
