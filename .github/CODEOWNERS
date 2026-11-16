@@ -1,0 +1,10 @@
+# Example. Replace the team and uncomment. With branch protection set to "Require review from Code Owners",
+# pull requests that change these files need this team's approval.
+#
+# The approval and tracker workflows push with the GitHub Actions token; if branch protection blocks that,
+# the daily update goes to the `tracking` branch instead (see README.md).
+#
+# /mitigations.yml           @your-org/security-team
+# /.github/                  @your-org/security-team
+# /veracode_iac_extract.py   @your-org/security-team
+# /requirements.txt          @your-org/security-team

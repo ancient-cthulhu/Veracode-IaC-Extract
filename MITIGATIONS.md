@@ -2,116 +2,76 @@
 
 English | [Español](MITIGATIONS.es.md)
 
-Mitigations for Container, IaC and Secrets findings are not yet available on the Veracode Platform. With
-`--mitigations`, the export itself tracks them: the repo keeps `veracode-findings.csv` (GitHub shows it as a
-table), people edit it offline in a locked Excel copy, and every run carries the mitigations onto the fresh
-findings.
+Mitigations for Container, IaC and Secrets findings are not available on the Veracode Platform. The findings
+tracker (see [README.md](README.md#findings-tracker-recommended)) keeps the approved ones in `mitigations.yml`
+and shows them in `FINDINGS.md`, `tracking/findings.csv` and exports.
 
-> **Never edit `Mitigation Key` or `Mitigation Status`.** The script sets both. The key links each row to its
-> finding on the next run; if it changes, the mitigation is lost. In the Excel copy both are locked.
+## Request and approve
 
-## Requirements
+1. **Request.** In `FINDINGS.md`, click **Mitigate** on the finding. GitHub opens the *Mitigation request* issue
+   form with the Finding Key, Finding ID and Asset filled in. Pick the type, write the reason, add the expiry date
+   for `accept-risk`, and submit. You can also open the form from Issues > New issue and copy the Finding Key from
+   `tracking/findings.csv`.
+2. **Approve.** An approver reviews the issue and adds the label `approved`. Approvers are the GitHub logins in the
+   repository variable `MITIGATION_APPROVERS` (Settings > Secrets and variables > Actions > Variables), comma or
+   space separated.
+3. **Recorded.** [veracode-mitigation.yml](.github/workflows/veracode-mitigation.yml) checks the approver and the
+   form, appends the next entry (`M-0001`, `M-0002`, ...) to `mitigations.yml`, refreshes the Mitigation columns
+   and `FINDINGS.md` without calling Veracode, commits `Approve mitigation M-000N (#issue)`, comments
+   "Approved as M-000N, applied to N finding(s)" and closes the issue.
 
-- Everything in [README.md](README.md#requirements)
-- `pip install openpyxl` for the Excel copy
-
-## Quick Start
-
-1. Get the latest findings into the tracking CSV (created on the first run):
-
-   ```bash
-   python veracode_iac_extract.py --compact --mitigations veracode-findings.csv
-   ```
-
-   Or download the `veracode-findings` artifact of the latest [GitHub Action](#github-action) run (CSV and Excel).
-
-2. Make the Excel copy, offline:
-
-   ```bash
-   python veracode_iac_extract.py --convert veracode-findings.csv veracode-findings.xlsx
-   ```
-
-3. Open `veracode-findings.xlsx`. On each row to mitigate, fill in the yellow cells; nothing else can be edited:
-
-   | Mitigation Type | Mitigation Reason | Mitigation Approved By | Mitigation Expires | Mitigation Notes |
-   | --- | --- | --- | --- | --- |
-   | accept-risk (dropdown) | Bucket serves the public status page through CloudFront | lead@acme.com | 2027-11-09 | CHG-4411 |
-
-4. Turn it back into the CSV. This validates every mitigation and refreshes `Mitigation Status`:
-
-   ```bash
-   python veracode_iac_extract.py --convert veracode-findings.xlsx veracode-findings.csv
-   # Wrote 4 rows (1 mitigated finding(s)) to veracode-findings.csv
-   ```
-
-5. Commit `veracode-findings.csv` in a pull request. The pull request gets a comment like this:
-
-   | Change | Finding | Asset | Type | Reason | Approved By | Expires | Notes |
-   | --- | --- | --- | --- | --- | --- | --- | --- |
-   | Added | AVD-AWS-0086 | acme/payments-infra | by-design | Public status page via CloudFront | lead@acme.com | | CHG-4411 |
-   | Changed | AVD-AWS-0089 | acme/sandbox-dev | accept-risk | Sandbox rebuilt nightly | lead@acme.com | ~~2027-02-01~~ 2027-05-01 | |
-   | Removed | aws-access-token | acme/payments-infra | false-positive | AWS example key in a test | lead@acme.com | | |
-
-Example: [examples/veracode-findings.example.csv](examples/veracode-findings.example.csv) (one mitigation,
-every column filled).
-
-## The Excel copy
-
-| Feature | Effect |
+| Situation | Result |
 | --- | --- |
-| Protected sheet | Only the yellow Mitigation cells can be edited. Key, Status and finding data are locked. Filtering still works |
-| Mitigation Type | Dropdown with the five types; other values are rejected |
-| Mitigation Expires | Accepts dates only; shown as `YYYY-MM-DD` |
-| Header notes and cell prompts | Explain each Mitigation column when selected |
-| How to use sheet | Steps, an example row, types and statuses |
-| Formatting | Status and severity colours, frozen header, filters, clickable Veracode Link, prints one page wide |
+| The person who added the label is not an approver | Label removed, comment "@login is not an approver" |
+| The form is invalid (bad key, type or date, missing reason, expiry in the past) | Label removed, comment with the problems. Edit the issue and add the label again |
+| The issue was edited after the label was added | Label removed. Review it and add the label again |
+| Rejecting | Close the issue without the label |
 
-The protection has no password. It prevents mistakes, not deliberate changes (Review > Unprotect Sheet).
-Do not commit the `.xlsx`; it is in `.gitignore`.
+### Scope of a request
 
-## Usage
+| Asset field | File field | The rule mitigates |
+| --- | --- | --- |
+| Unchanged (as filled in by the link) | Empty | This finding only (`finding` is its Finding Key) |
+| With a wildcard, for example `acme/payments-*` | Any | This Finding ID on every matching asset |
+| Any | A path pattern, for example `modules/status/*` | This Finding ID in matching files |
 
-```bash
-# Refresh the tracking CSV from Veracode (reads it, then writes it back)
-python veracode_iac_extract.py --compact --mitigations veracode-findings.csv
+A rule that matches everything (`finding: "*"` with no asset or file) is refused.
 
-# CSV -> Excel and back, offline
-python veracode_iac_extract.py --convert veracode-findings.csv veracode-findings.xlsx
-python veracode_iac_extract.py --convert veracode-findings.xlsx veracode-findings.csv
+## mitigations.yml
 
-# Validate and list every mitigation, offline
-python veracode_iac_extract.py --check-mitigations veracode-findings.csv
+The template starts with an empty list (`[]`). Entries look like this
+([examples/mitigations.example.yml](examples/mitigations.example.yml)):
 
-# What changed compared with another version (Markdown, as in the pull request comment)
-python veracode_iac_extract.py --check-mitigations veracode-findings.csv --against old.csv
-
-# Only what still needs fixing, to a separate file (the tracking file is not changed)
-python veracode_iac_extract.py --compact --mitigations veracode-findings.csv \
-  --where "Mitigation Status!=Mitigated" -o to-fix.xlsx
+```yaml
+- id: M-0001
+  finding: AVD-AWS-0086
+  asset: acme/payments-*
+  file: modules/status/*
+  type: accept-risk
+  reason: Public status page served through CloudFront
+  approved_by: lead-dev
+  approved_on: 2026-11-15
+  expires: 2027-11-09
+  ref: https://github.com/acme/veracode-findings/issues/12
 ```
 
-## Configuration
-
-### Flags
-
-| Flag | Effect |
-| --- | --- |
-| `--mitigations FILE` | Read mitigations from `FILE` (`.csv` or `.xlsx`), then write the fresh export back to it. `-o` writes elsewhere instead |
-| `--convert IN OUT` | Convert between `.csv` and `.xlsx`, offline. Validates mitigations and refreshes Mitigation Status; writes nothing if invalid |
-| `--check-mitigations FILE` | Validate and list every mitigation, offline: exit 0 valid, 2 invalid |
-| `--against BASE` | With `--check-mitigations`: Markdown table of mitigations added, changed or removed compared with `BASE` |
-
-### Columns added
-
-| Column | Filled by | Notes |
+| Field | Required | Meaning |
 | --- | --- | --- |
-| Mitigation Status | Script | First column. Do not edit |
-| Mitigation Type | You | One of the types below |
-| Mitigation Reason | You | Required |
-| Mitigation Approved By | You | Required |
-| Mitigation Expires | You | `YYYY-MM-DD`. Required for `accept-risk` |
-| Mitigation Notes | You | Optional (ticket, change number) |
-| Mitigation Key | Script | Last column. Do not edit |
+| `id` | Yes | `M-` and at least 4 digits, unique. The workflow assigns the next free number |
+| `finding` | Yes | Finding ID, CVE or Finding Key (`mk-...`). `*` and `?` are wildcards; the whole value must match; not case-sensitive |
+| `asset` | No | Asset Name or Asset ID, with wildcards |
+| `file` | No | File Path or Location, with wildcards |
+| `type` | Yes | One of the types below |
+| `reason` | Yes | Why the finding needs no fix |
+| `approved_by` | Yes | The approver. The workflow writes the GitHub login |
+| `approved_on` | No | `YYYY-MM-DD`. Set by the workflow |
+| `expires` | For `accept-risk` | `YYYY-MM-DD`. From the day after, the finding counts as open again |
+| `ref` | No | Issue link (set by the workflow), `migrated`, or any text |
+| `requested_by` | No | Issue author. Set by the workflow |
+| `notes` | No | Ticket or change number |
+| `allow_broad` | No | `true` to allow a rule that matches every finding |
+
+When several rules match a finding, the first one in the file that has not expired wins.
 
 ### Types (same as Static Analysis)
 
@@ -121,55 +81,68 @@ python veracode_iac_extract.py --compact --mitigations veracode-findings.csv \
 | `by-design` | Setting is deliberate and approved | Mitigate by Design |
 | `network-environment` | A network control blocks it (WAF, security group, private network) | Mitigate by Network Environment |
 | `os-environment` | OS or runtime blocks it (hardened host, read-only file system, no shell) | Mitigate by OS Environment |
-| `accept-risk` | Business accepts the risk; needs Mitigation Expires | Accept the Risk |
+| `accept-risk` | Business accepts the risk; needs `expires` | Accept the Risk |
 
-### Statuses
+### Mitigation Status
 
-| Mitigation Status | Meaning |
+| Value | Meaning |
 | --- | --- |
-| Open | Not mitigated |
-| Mitigated | Mitigated and not expired |
-| Expired | Mitigation Expires has passed; counts as open |
-| Not in export | Mitigated, but the finding was not in the last export (fixed, or filtered out). Kept so the mitigation returns if the finding does. Delete the row when no longer needed |
+| `Mitigated` | A rule matches and has not expired |
+| `Expiring` | It expires in 30 days or less. Listed in `FINDINGS.md` |
+| `Expired` | The expiry date has passed. Counts as open; listed in `FINDINGS.md` with a Mitigate link to renew |
+| (empty) | Not mitigated |
 
-## GitHub Action
+## Edit, renew, revoke
 
-[.github/workflows/veracode-iac-findings.yml](.github/workflows/veracode-iac-findings.yml):
+- **Edit or add directly:** change `mitigations.yml` in a pull request. The `check` job validates the file and
+  comments a table of the rules added, changed or removed, with how many open findings each one matches. The
+  check runs the script from the base branch, so a pull request cannot change how it is checked. It fails when the
+  file is invalid; make it a required check.
+- **Renew:** change `expires` in a pull request, or request again from the Mitigate link.
+- **Revoke:** delete the entry in a pull request. The next run (or the next approval) shows the findings as not
+  mitigated.
 
-| Trigger | Job | Result |
-| --- | --- | --- |
-| Daily, 04:23 UTC, or Actions > Veracode IaC findings > Run workflow | `export` | Refreshes `veracode-findings.csv` from the repo's copy and attaches it, plus the Excel copy, as artifact `veracode-findings` |
-| Pull request changing `veracode-findings.csv` | `check-mitigations` | Comments the table of changes on the pull request (updated on each push), adds it to the job summary, and fails if any mitigation is invalid |
+Check locally, without Veracode access:
 
-The Action does not commit. Commit the CSV yourself through a pull request.
+```bash
+python veracode_iac_extract.py --check-mitigations mitigations.yml
+python veracode_iac_extract.py --check-mitigations mitigations.yml --against old.yml --track tracking   # PR table
+python veracode_iac_extract.py -o findings.csv --mitigations mitigations.yml   # export with Mitigation columns
+```
 
-Setup:
-
-1. Add repository secrets `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`.
-2. Optional: require the `check-mitigations` check before merging.
-3. Optional: repository variable `VERACODE_EXTRACT_ARGS` with filters added to every run, for example `--asset my-org/*`.
-
-Pull requests from forks get a read-only token, so they get the job summary but no comment.
-
-## Important Notes
-
-- **The tool does not enforce approval.** `Mitigation Approved By` is free text; anyone who can change the CSV can mitigate anything. Decide how approvals are controlled, for example a CODEOWNERS entry for `veracode-findings.csv` plus branch protection requiring that review.
-- **Use `--compact` for the file you commit.** The full export includes `Code Lines`, which can contain the secret itself.
-- **Mitigations do not change the Veracode Platform**, including policy results.
-- `Mitigation Key` ignores line numbers and image tags (`app:1.2` and `app:1.3` share keys). It changes when the file is moved or renamed, the resource is renamed, or a secret's value changes: the old row becomes `Not in export` and the finding appears as a new `Open` row. Copy the Mitigation columns to the new row.
-- Rows with the same key (for example the same image under two tags) share one mitigation; fill in any one of them.
-- Use the same filters on every run. Open findings excluded by a filter are dropped from the file; mitigated ones are kept as `Not in export`.
-- Invalid Mitigation columns stop `--mitigations` and `--convert` with exit code 2 and leave the files unchanged.
-- The CSV can also be edited directly in Excel. Files saved with `;` separators or Windows encoding are read correctly, and rewritten dates (for example `31/12/2027`) are accepted when unambiguous.
-- The run summary lists mitigations that have expired or expire within 30 days.
-
-## Troubleshooting
-
-| Message | Fix |
+| Flag | Effect |
 | --- | --- |
-| `Nothing was changed. Fix veracode-findings.csv and run again.` / `Nothing was written.` | Run `--check-mitigations`; it lists each problem by row number |
-| `Excel files need openpyxl` | `pip install openpyxl` |
-| `Mitigation Key is missing or changed. Do not edit it` | Restore the key from the previous file, or redo the row from a fresh export |
-| `has no Mitigation Key column` | The file was not written with `--mitigations`; run Quick Start step 1 |
-| `same Mitigation Key as row N but a different mitigation` | Make both rows match, or clear one |
-| `could be day/month or month/day. Use YYYY-MM-DD` | The CSV was edited directly; retype the date as `YYYY-MM-DD`, or edit through the Excel copy |
+| `--mitigations FILE` | Apply the rules in `FILE` to `--track` or to an export |
+| `--check-mitigations FILE` | Validate and list the rules: exit 0 valid, 2 invalid. Unknown keys, missing fields, bad types or dates and duplicate ids are errors; an expiry in the past is a warning |
+| `--against BASE` | With `--check-mitigations`: Markdown table of the changes compared with `BASE` (capped at 60,000 characters) |
+| `--track DIR` | With `--against`: count the open findings in `DIR/findings.csv` that each rule matches |
+| `--approve-issue FILE` | Used by the workflow: turn the issue JSON in `FILE` into an entry. Exit 2 invalid, 3 not an approver |
+| `--approver LOGIN` | With `--approve-issue`: who added the label. Checked against `MITIGATION_APPROVERS` |
+
+## Security notes
+
+- Only people who can add labels (triage access or more) can trigger an approval, and only logins in
+  `MITIGATION_APPROVERS` are accepted. Changing that variable needs admin access.
+- Protect `mitigations.yml` and `.github/` with [CODEOWNERS](.github/CODEOWNERS) and branch protection. Direct
+  edits by people with write access are possible otherwise.
+- The issue text never reaches a shell: the workflow passes it to the script as a JSON file. The issue is read
+  from the label event, and the approval is refused if the issue was edited afterwards.
+- Every value shown in comments and in `FINDINGS.md` is escaped: no HTML, no hidden comments, no @mentions, no
+  table breaks.
+- The daily job and the approval job share one concurrency group, so they never write at the same time.
+
+## Limitations
+
+- Mitigations affect the tracker and the exports only. They do not change the Veracode Platform, policy results
+  or pipeline gates.
+- A Finding Key changes when the file is moved or renamed, the resource is renamed, or a secret's value changes.
+  The finding then shows as New; request the mitigation again, or use a rule by Finding ID with an asset or file
+  scope.
+
+## Moving from the CSV tracking file
+
+Older versions kept mitigations in `veracode-findings.csv` (`--mitigations FILE.csv`, `--convert`). On the
+first `--track` run, if `veracode-findings.csv` is next to the `tracking` folder (or with
+`--migrate FILE`), every mitigated row becomes a `mitigations.yml` entry (`finding` = its key, `ref: migrated`)
+and the findings keep their First Seen date. The old file is not used after that and can be deleted. Invalid
+rows stop the run with exit 2 and change nothing.

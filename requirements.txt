@@ -1,0 +1,5 @@
+requests
+veracode-api-signing
+veracode-api-py
+PyYAML>=6.0
+openpyxl  # optional, for .xlsx

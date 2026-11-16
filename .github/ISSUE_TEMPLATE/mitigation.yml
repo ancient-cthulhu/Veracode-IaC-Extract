@@ -1,0 +1,65 @@
+name: Mitigation request
+description: Ask to mitigate a Veracode IaC, container or secrets finding. Easiest from a Mitigate link in FINDINGS.md.
+title: "Mitigate: "
+labels: ["mitigation-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An approver reviews this request and adds the `approved` label. The mitigation is then recorded in
+        `mitigations.yml` and this issue is closed. Approvers are listed in the repository variable
+        `MITIGATION_APPROVERS`. To reject, close the issue.
+  - type: input
+    id: finding_key
+    attributes:
+      label: Finding Key
+      description: The finding's key (mk-...), from FINDINGS.md or tracking/findings.csv. The Mitigate link fills it in.
+      placeholder: mk-0123456789ab
+    validations:
+      required: true
+  - type: input
+    id: finding_id
+    attributes:
+      label: Finding ID
+      description: Rule ID or CVE. Required when Asset has a wildcard or File is set.
+      placeholder: AVD-AWS-0086
+  - type: input
+    id: asset
+    attributes:
+      label: Asset
+      description: Asset name. Use a wildcard (acme/payments-*) to mitigate this Finding ID on more assets.
+  - type: input
+    id: file
+    attributes:
+      label: File
+      description: Optional. Limits the mitigation to a file or path pattern (modules/status/*) for this Finding ID.
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - false-positive
+        - by-design
+        - network-environment
+        - os-environment
+        - accept-risk
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: Reason
+      description: Why this finding does not need a fix.
+    validations:
+      required: true
+  - type: input
+    id: expires
+    attributes:
+      label: Expires
+      description: YYYY-MM-DD. Required for accept-risk. After this date the finding counts as open again.
+      placeholder: "2027-12-31"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / ticket
+      description: Optional. Ticket or change number.
