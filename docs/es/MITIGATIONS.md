@@ -1,9 +1,9 @@
 # Mitigaciones
 
-[English](MITIGATIONS.md) | Español
+[English](../MITIGATIONS.md) | Español
 
 La Veracode Platform no tiene mitigaciones para los hallazgos de Container, IaC y Secrets. El
-[seguimiento de hallazgos](README.es.md#seguimiento-de-hallazgos-recomendado) las registra en `mitigations.yml`
+[seguimiento de hallazgos](README.md#seguimiento-de-hallazgos-recomendado) las registra en `mitigations.yml`
 y las muestra en `FINDINGS.md`, `tracking/findings.csv` y en cada exportación.
 
 ## Solicitar y aprobar
@@ -58,7 +58,7 @@ y las muestra en `FINDINGS.md`, `tracking/findings.csv` y en cada exportación.
 | `allow_broad` | No | `true` para permitir una regla que coincide con todos los hallazgos |
 
 Si coinciden varias reglas, gana la primera sin caducar del archivo. Más ejemplos:
-[examples/mitigations.example.yml](examples/mitigations.example.yml).
+[examples/mitigations.example.yml](../../examples/mitigations.example.yml).
 
 | Tipo | Cuándo usarlo |
 | --- | --- |
@@ -88,7 +88,7 @@ python veracode_iac_extract.py -o findings.csv --mitigations mitigations.yml    
 ## Seguridad
 
 - Solo los logins de `MITIGATION_APPROVERS` pueden aprobar; cambiar la variable requiere acceso de administrador.
-- Protege `mitigations.yml` y `.github/` con [CODEOWNERS](.github/CODEOWNERS) y protección de rama.
+- Protege `mitigations.yml` y `.github/` con [CODEOWNERS](../../.github/CODEOWNERS) y protección de rama.
 - El texto de la incidencia nunca llega a una shell, y todo lo que se muestra en comentarios y en `FINDINGS.md`
   se escapa.
 - La comprobación del pull request usa el script de la rama base, así que un pull request no puede cambiar su

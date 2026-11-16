@@ -1,6 +1,6 @@
 # Extracción de hallazgos de Veracode IaC / Container / Secrets
 
-[English](README.md) | Español
+[English](../../README.md) | Español
 
 Exporta los hallazgos de Veracode Container Security (imágenes de contenedor, IaC, secretos) a CSV, JSON,
 JSONL o Excel, una fila por hallazgo, con filtros. También ejecuta un seguimiento de hallazgos en un repositorio
@@ -41,7 +41,7 @@ Cada cambio es un commit (`Daily findings: +2 new, -1 fixed`), así que el histo
 | `FINDINGS.md` | Panel: totales, nuevos, mitigaciones que caducan, abiertos, corregidos en los últimos 30 días. Enlaces a Veracode y Mitigate |
 | `tracking/findings.csv` | Hallazgos abiertos: estado, severidad, ubicación, First Seen, Days Open, mitigación |
 | `tracking/fixed.csv` | Hallazgos corregidos, con Fixed On y Days Open |
-| `mitigations.yml` | Mitigaciones aprobadas. Consulta [MITIGATIONS.es.md](MITIGATIONS.es.md) |
+| `mitigations.yml` | Mitigaciones aprobadas. Consulta [MITIGATIONS.es.md](MITIGATIONS.md) |
 
 Cada ejecución adjunta además un informe completo en Excel (artefacto `veracode-findings`, 30 días, sin líneas de
 código).
@@ -250,4 +250,4 @@ sin escribir nada; usa CSV en ese caso.
 
 ## Documentación relacionada
 
-- [MITIGATIONS.es.md](MITIGATIONS.es.md): solicitar, aprobar, editar y revocar mitigaciones; campos de `mitigations.yml`
+- [MITIGATIONS.es.md](MITIGATIONS.md): solicitar, aprobar, editar y revocar mitigaciones; campos de `mitigations.yml`

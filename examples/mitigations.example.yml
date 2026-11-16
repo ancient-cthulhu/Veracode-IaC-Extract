@@ -1,4 +1,4 @@
-# Example mitigations.yml. See MITIGATIONS.md for every field.
+# Example mitigations.yml. See docs/MITIGATIONS.md for every field.
 
 # Recorded by the approval workflow from issue #12: one finding, exact scope.
 - id: M-0001

@@ -1,6 +1,6 @@
 # Veracode IaC / Container / Secrets Findings Extract
 
-English | [Español](README.es.md)
+English | [Español](docs/es/README.md)
 
 Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON, JSONL or Excel,
 one row per finding, with filters. It also runs a findings tracker in a GitHub repository, with mitigations.
@@ -40,7 +40,7 @@ Every change is a commit (`Daily findings: +2 new, -1 fixed`), so the git histor
 | `FINDINGS.md` | Dashboard: totals, new, expiring mitigations, open, fixed in the last 30 days. Veracode and Mitigate links |
 | `tracking/findings.csv` | Open findings: status, severity, location, First Seen, Days Open, mitigation |
 | `tracking/fixed.csv` | Fixed findings, with Fixed On and Days Open |
-| `mitigations.yml` | Approved mitigations. See [MITIGATIONS.md](MITIGATIONS.md) |
+| `mitigations.yml` | Approved mitigations. See [MITIGATIONS.md](docs/MITIGATIONS.md) |
 
 Each run also attaches a full Excel report (artifact `veracode-findings`, 30 days, no code lines).
 
@@ -245,4 +245,4 @@ Excel's 1,048,575-row limit stops with exit 2 before writing; use CSV for it.
 
 ## Related Documentation
 
-- [MITIGATIONS.md](MITIGATIONS.md): requesting, approving, editing and revoking mitigations; `mitigations.yml` fields
+- [MITIGATIONS.md](docs/MITIGATIONS.md): requesting, approving, editing and revoking mitigations; `mitigations.yml` fields

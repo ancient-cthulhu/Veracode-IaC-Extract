@@ -2020,7 +2020,7 @@ ISSUE_FORM_FIELDS = {"Finding Key": "finding_key", "Finding ID": "finding_id", "
                      "Type": "type", "Reason": "reason", "Expires": "expires", "Notes / ticket": "notes"}
 NO_RESPONSE = "_No response_"
 NOT_APPROVER = 3  # exit code: the person who added the label is not in MITIGATION_APPROVERS
-MITIGATIONS_HEADER = ("# Approved mitigations for the Veracode findings tracker. See MITIGATIONS.md.\n"
+MITIGATIONS_HEADER = ("# Approved mitigations for the Veracode findings tracker. See docs/MITIGATIONS.md.\n"
                       "# The approval workflow appends entries here; you can also add or remove them in a pull "
                       "request.\n")
 _RE_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$")
@@ -2395,7 +2395,7 @@ examples:
                         "--mitigations and keep its First Seen dates. Done automatically on the first run when "
                         f"{OLD_TRACKING_FILE} sits next to DIR.")
 
-    g = p.add_argument_group("mitigations (see MITIGATIONS.md)")
+    g = p.add_argument_group("mitigations (see docs/MITIGATIONS.md)")
     g.add_argument("--mitigations", metavar="FILE",
                    help="Mitigation rules file (mitigations.yml). Adds the Mitigation columns (Status, Type, "
                         "Reason, Approved By, Expires, Ref) to an export or to --track.")
