@@ -3,80 +3,16 @@
 English | [Español](docs/es/README.md)
 
 Exports Veracode Container Security findings (container images, IaC, secrets) to CSV, JSON, JSONL or Excel,
-one row per finding, with filters. It also runs a findings tracker in a GitHub repository, with mitigations.
+one row per finding, with filters.
 
-## Findings tracker (recommended)
-
-A private GitHub repository that follows every finding over time, like Static Analysis on the Veracode
-Platform, and records approved mitigations. It runs in GitHub Actions; nothing to install.
-
-### Setup
-
-1. **Use this template > Create a new repository** (private).
-2. Settings > Secrets and variables > Actions:
-   - secrets `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`
-   - variable `MITIGATION_APPROVERS`: GitHub logins allowed to approve, for example `alice bob`
-   - optional variable `VERACODE_TRACK_ARGS` with scan filters, for example `--asset my-org/*`
-3. Actions > **Veracode findings tracker** > **Run workflow** (afterwards it runs daily at 05:23 UTC).
-
-### How it works
-
-| When | What happens |
-| --- | --- |
-| Day 1 | The daily run finds `AVD-AWS-0086` in `acme/payments-infra`. It appears as **New** in `FINDINGS.md` with a **Mitigate** link |
-| Day 2 | Still in the latest scan: **Open**. Days Open counts up |
-| Request | A developer clicks **Mitigate**. A pre-filled issue opens; they pick a type, write the reason and an expiry date |
-| Approve | An approver adds the label `approved`. The bot records `M-0001` in `mitigations.yml`, marks the finding **Mitigated**, comments and closes the issue |
-| Fix | Another finding is fixed and its asset is scanned again. The next run moves it to `tracking/fixed.csv` with Fixed On and Days Open |
-| Regression | A fixed finding comes back: **Reopened**, with its original First Seen |
-| Expiry | 30 days before `expires` the mitigation shows as **Expiring**; after it, **Expired** and the finding counts as open again |
-
-Every change is a commit (`Daily findings: +2 new, -1 fixed`), so the git history is the audit trail.
-
-### Files
-
-| File | Content |
-| --- | --- |
-| `FINDINGS.md` | Dashboard: totals, new, expiring mitigations, open, fixed in the last 30 days. Veracode and Mitigate links |
-| `tracking/findings.csv` | Open findings: status, severity, location, First Seen, Days Open, mitigation |
-| `tracking/fixed.csv` | Fixed findings, with Fixed On and Days Open |
-| `mitigations.yml` | Approved mitigations. See [MITIGATIONS.md](docs/MITIGATIONS.md) |
-
-Each run also attaches a full Excel report (artifact `veracode-findings`, 30 days, no code lines).
-
-### Statuses
-
-| Status | Meaning |
-| --- | --- |
-| New | First seen in this run. Open from the next day |
-| Open | In the latest scan of its asset |
-| Reopened | Was fixed and came back |
-| Asset Missing | The asset is no longer in Veracode. After 30 days it moves to `fixed.csv` as `asset-removed` |
-| Fixed | Gone from a newer scan of its asset. Moved to `fixed.csv` |
-
-A finding is only marked fixed when its asset was scanned again. If any request fails, the run changes nothing
-and opens an issue labelled `tracker-failure` (closed by the next good run). If branch protection rejects the
-push, the update goes to the branch `tracking`.
-
-### Tracker flags
-
-| Flag | Effect |
-| --- | --- |
-| `--track DIR` | Update `DIR/findings.csv`, `DIR/fixed.csv` and the dashboard. Scan filters apply; finding filters are refused |
-| `--offline` | With `--track`: refresh Days Open, mitigations and the dashboard without calling Veracode |
-| `--mitigations FILE` | The rules file, `mitigations.yml` |
-| `--dashboard FILE` | Dashboard path (default `FINDINGS.md` next to `DIR`) |
-| `--repo-url URL` | `https://github.com/<org>/<repo>` for Mitigate links (detected in GitHub Actions) |
-| `--migrate OLD_CSV` | Import mitigations from a `veracode-findings.csv` tracking file (automatic when it sits next to `DIR`) |
-| `-o FILE` | With `--track`: also write every current finding with all columns |
-
-Locally: `python veracode_iac_extract.py --track tracking --mitigations mitigations.yml`
+To track findings over time and approve mitigations, see [Veracode-IaC-Mitigation-Tracker](https://github.com/ancient-cthulhu/Veracode-IaC-Mitigation-Tracker).
 
 ## Requirements
 
-- Python 3.9 or later (CI uses 3.12)
-- `pip install -r requirements.txt` (requests, veracode-api-signing, veracode-api-py, PyYAML for `mitigations.yml`; openpyxl for Excel `.xlsx` output)
-- Veracode API credentials in `~/.veracode/credentials`, or `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`
+- Python 3.9 or later
+- `pip install -r requirements.txt` (requests, veracode-api-signing, veracode-api-py; openpyxl for Excel `.xlsx` output)
+- Veracode API credentials in `~/.veracode/credentials`, or in the environment variables `VERACODE_API_ID` and
+  `VERACODE_API_KEY` (`VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET` are also accepted)
 - Account with the Reviewer role that can see Container and IaC scans
 
 ## Quick Start
@@ -169,7 +105,6 @@ Never case-sensitive. Different flags combine with AND.
 | Flag | Effect |
 | --- | --- |
 | `-o FILE` | Output file (default `veracode_iac_findings.csv`). Extension sets the format: `.csv`, `.json`, `.jsonl`, `.xlsx` |
-| `--mitigations FILE` | Add the Mitigation columns (Status, Type, Reason, Approved By, Expires, Ref, ID) from `mitigations.yml` |
 | `--format` | Force `csv`, `json`, `jsonl` or `xlsx` regardless of extension |
 | `--compact` | Asset Name, Scan Type (`container`, `iac`), Asset Type (`image`, `repo`, `archive`, `directory`), Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
 | `--columns "A,B,C"` | Choose and order columns. Unknown names stop the run before any request (exit 2) |
@@ -188,7 +123,7 @@ Never case-sensitive. Different flags combine with AND.
 | Where | Asset Name, Asset ID, Asset Type, Scan Type, Scan Source, Location (`path:line` or `path:start-end`), File Path, Start Line, End Line, All File Paths, Code Lines, Provider, Service, Resource, Image Tags, Image Distro, Image Hash, Image Labels, Layer IDs |
 | Fix | Library (`name@version`), Library Name, Library Version, Fix Available (blank when no library), Fix State, Fixed Versions, Suggested Fix |
 | Scan | Scan ID, Scan Date, Scan Age Days, Scan Duration, Scan Status, Scanned By, Policy Name, Policy ID, Scan Policy Status, Scan Total Findings, Scan Critical/High/Medium/Low/Negligible/Unknown, Veracode Link |
-| Tracking | Finding Key, Is Latest Scan For Asset, First Seen, Last Seen, Seen In Scans |
+| History | Finding Key, Is Latest Scan For Asset, First Seen, Last Seen, Seen In Scans |
 
 API fields not listed appear as `Scan: <field>` or `Finding: <field>` columns.
 
@@ -229,9 +164,37 @@ Excel's 1,048,575-row limit stops with exit 2 before writing; use CSV for it.
 | --- | --- |
 | 0 | Complete |
 | 1 | Incomplete: some requests failed (listed in the summary), or the output file was locked |
-| 2 | Bad arguments, invalid `mitigations.yml`, or invalid mitigation request |
-| 3 | `--approve-issue`: the person who added the label is not in `MITIGATION_APPROVERS` |
+| 2 | Bad arguments |
 | 130 | Interrupted |
+
+## Library API
+
+Other scripts can import the file instead of running it. The supported names are the ones in `__all__`;
+`__version__` is the release.
+
+```python
+import veracode_iac_extract as vx
+
+scans, rows, failures = vx.collect_latest(asset="my-org/*", scan_type="iac")
+```
+
+```python
+collect_latest(base_url=None, link_base=None, *, asset=None, exclude_asset=None, scan_type=None,
+               asset_type=None, scanned_by=None, policy=None, since=None, until=None, workers=4, rps=2.0,
+               max_attempts=6, timeout=90, ca_cert=None, minter=None, now=None, log=print)
+```
+
+It reads every finding of the latest scan of each asset that passes the scan filters. The filter arguments take
+the same values as the flags (a pattern or a list of patterns). No scan is skipped and nothing is written.
+
+| Returned | Content |
+| --- | --- |
+| `scans` | One row per scan in the tenant, with the scan columns of the export. `"_read": True` on the scans whose findings were read in full |
+| `rows` | One row per finding of those scans, with the export columns (Code Lines included) |
+| `failures` | `(scope, detail)` for every failed request. Not empty means the data is incomplete |
+
+It raises `ExtractError`: `exit_code` 2 for bad input, 1 when the token or the scan list cannot be read.
+`base_url` and `link_base` come from the credentials' region unless given (required for FedRAMP).
 
 ## Troubleshooting
 
@@ -245,4 +208,4 @@ Excel's 1,048,575-row limit stops with exit 2 before writing; use CSV for it.
 
 ## Related Documentation
 
-- [MITIGATIONS.md](docs/MITIGATIONS.md): requesting, approving, editing and revoking mitigations; `mitigations.yml` fields
+- [Veracode-IaC-Mitigation-Tracker](https://github.com/ancient-cthulhu/Veracode-IaC-Mitigation-Tracker): findings tracker with mitigations, built on this script

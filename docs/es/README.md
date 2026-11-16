@@ -3,82 +3,16 @@
 [English](../../README.md) | Español
 
 Exporta los hallazgos de Veracode Container Security (imágenes de contenedor, IaC, secretos) a CSV, JSON,
-JSONL o Excel, una fila por hallazgo, con filtros. También ejecuta un seguimiento de hallazgos en un repositorio
-de GitHub, con mitigaciones.
+JSONL o Excel, una fila por hallazgo, con filtros.
 
-## Seguimiento de hallazgos (recomendado)
-
-Un repositorio privado de GitHub que sigue cada hallazgo a lo largo del tiempo, como Static Analysis en la
-Veracode Platform, y registra las mitigaciones aprobadas. Se ejecuta en GitHub Actions; no hay que instalar nada.
-
-### Configuración
-
-1. **Use this template > Create a new repository** (privado).
-2. Settings > Secrets and variables > Actions:
-   - secretos `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`
-   - variable `MITIGATION_APPROVERS`: logins de GitHub que pueden aprobar, por ejemplo `alice bob`
-   - variable opcional `VERACODE_TRACK_ARGS` con filtros de escaneo, por ejemplo `--asset my-org/*`
-3. Actions > **Veracode findings tracker** > **Run workflow** (después se ejecuta cada día a las 05:23 UTC).
-
-### Cómo funciona
-
-| Cuándo | Qué pasa |
-| --- | --- |
-| Día 1 | La ejecución diaria encuentra `AVD-AWS-0086` en `acme/payments-infra`. Aparece como **New** en `FINDINGS.md` con un enlace **Mitigate** |
-| Día 2 | Sigue en el último escaneo: **Open**. Days Open va sumando |
-| Solicitud | Un desarrollador pulsa **Mitigate**. Se abre una incidencia ya rellenada; elige el tipo, escribe el motivo y una fecha de caducidad |
-| Aprobación | Un aprobador añade la etiqueta `approved`. El bot registra `M-0001` en `mitigations.yml`, marca el hallazgo como **Mitigated**, comenta y cierra la incidencia |
-| Corrección | Otro hallazgo se corrige y su asset se vuelve a escanear. La siguiente ejecución lo pasa a `tracking/fixed.csv` con Fixed On y Days Open |
-| Regresión | Un hallazgo corregido vuelve: **Reopened**, con su First Seen original |
-| Caducidad | 30 días antes de `expires` la mitigación aparece como **Expiring**; después, **Expired** y el hallazgo vuelve a contar como abierto |
-
-Cada cambio es un commit (`Daily findings: +2 new, -1 fixed`), así que el historial de git es la auditoría.
-
-### Archivos
-
-| Archivo | Contenido |
-| --- | --- |
-| `FINDINGS.md` | Panel: totales, nuevos, mitigaciones que caducan, abiertos, corregidos en los últimos 30 días. Enlaces a Veracode y Mitigate |
-| `tracking/findings.csv` | Hallazgos abiertos: estado, severidad, ubicación, First Seen, Days Open, mitigación |
-| `tracking/fixed.csv` | Hallazgos corregidos, con Fixed On y Days Open |
-| `mitigations.yml` | Mitigaciones aprobadas. Consulta [MITIGATIONS.es.md](MITIGATIONS.md) |
-
-Cada ejecución adjunta además un informe completo en Excel (artefacto `veracode-findings`, 30 días, sin líneas de
-código).
-
-### Estados
-
-| Status | Significado |
-| --- | --- |
-| New | Visto por primera vez en esta ejecución. Open desde el día siguiente |
-| Open | Está en el último escaneo de su asset |
-| Reopened | Estaba corregido y ha vuelto |
-| Asset Missing | El asset ya no está en Veracode. A los 30 días pasa a `fixed.csv` como `asset-removed` |
-| Fixed | Ya no está en un escaneo más reciente de su asset. Pasa a `fixed.csv` |
-
-Un hallazgo solo se marca como corregido cuando su asset se ha vuelto a escanear. Si falla alguna petición, la
-ejecución no cambia nada y abre una incidencia con la etiqueta `tracker-failure` (se cierra con la siguiente
-ejecución correcta). Si la protección de rama rechaza el push, la actualización va a la rama `tracking`.
-
-### Flags del seguimiento
-
-| Flag | Efecto |
-| --- | --- |
-| `--track DIR` | Actualiza `DIR/findings.csv`, `DIR/fixed.csv` y el panel. Se aplican los filtros de escaneo; los de hallazgo se rechazan |
-| `--offline` | Con `--track`: actualiza Days Open, las mitigaciones y el panel sin llamar a Veracode |
-| `--mitigations ARCHIVO` | El archivo de reglas, `mitigations.yml` |
-| `--dashboard ARCHIVO` | Ruta del panel (por defecto `FINDINGS.md` junto a `DIR`) |
-| `--repo-url URL` | `https://github.com/<org>/<repo>` para los enlaces Mitigate (se detecta en GitHub Actions) |
-| `--migrate CSV_ANTIGUO` | Importa las mitigaciones de un `veracode-findings.csv` (automático si está junto a `DIR`) |
-| `-o ARCHIVO` | Con `--track`: escribe además cada hallazgo actual con todas las columnas |
-
-En local: `python veracode_iac_extract.py --track tracking --mitigations mitigations.yml`
+Para seguir los hallazgos a lo largo del tiempo y aprobar mitigaciones, consulta [Veracode-IaC-Mitigation-Tracker](https://github.com/ancient-cthulhu/Veracode-IaC-Mitigation-Tracker).
 
 ## Requisitos
 
-- Python 3.9 o posterior (CI usa 3.12)
-- `pip install -r requirements.txt` (requests, veracode-api-signing, veracode-api-py, PyYAML para `mitigations.yml`; openpyxl para la salida en Excel `.xlsx`)
-- Credenciales de la API de Veracode en `~/.veracode/credentials`, o `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`
+- Python 3.9 o posterior
+- `pip install -r requirements.txt` (requests, veracode-api-signing, veracode-api-py; openpyxl para la salida en Excel `.xlsx`)
+- Credenciales de la API de Veracode en `~/.veracode/credentials`, o en las variables de entorno `VERACODE_API_ID` y
+  `VERACODE_API_KEY` (también se aceptan `VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET`)
 - Cuenta con rol Reviewer que pueda ver los escaneos de Container e IaC
 
 ## Inicio rápido
@@ -171,7 +105,6 @@ Nunca distingue mayúsculas de minúsculas. Varios flags se combinan con Y.
 | Flag | Efecto |
 | --- | --- |
 | `-o ARCHIVO` | Archivo de salida (por defecto `veracode_iac_findings.csv`). La extensión fija el formato: `.csv`, `.json`, `.jsonl`, `.xlsx` |
-| `--mitigations ARCHIVO` | Añade las columnas Mitigation (Status, Type, Reason, Approved By, Expires, Ref, ID) a partir de `mitigations.yml` |
 | `--format` | Fuerza `csv`, `json`, `jsonl` o `xlsx` sin importar la extensión |
 | `--compact` | Asset Name, Scan Type (`container`, `iac`), Asset Type (`image`, `repo`, `archive`, `directory`), Severity, CVSS, Finding Type, Finding ID, Title, Library, Fixed Versions, Location, Suggested Fix, Scan Date, Veracode Link |
 | `--columns "A,B,C"` | Elige y ordena las columnas. Un nombre desconocido detiene la ejecución antes de cualquier petición (código 2) |
@@ -192,7 +125,7 @@ Los nombres de columna salen en inglés.
 | Dónde está | Asset Name, Asset ID, Asset Type, Scan Type, Scan Source, Location (`ruta:línea` o `ruta:inicio-fin`), File Path, Start Line, End Line, All File Paths, Code Lines, Provider, Service, Resource, Image Tags, Image Distro, Image Hash, Image Labels, Layer IDs |
 | Corrección | Library (`nombre@versión`), Library Name, Library Version, Fix Available (vacío si no hay librería), Fix State, Fixed Versions, Suggested Fix |
 | Escaneo | Scan ID, Scan Date, Scan Age Days, Scan Duration, Scan Status, Scanned By, Policy Name, Policy ID, Scan Policy Status, Scan Total Findings, Scan Critical/High/Medium/Low/Negligible/Unknown, Veracode Link |
-| Seguimiento | Finding Key, Is Latest Scan For Asset, First Seen, Last Seen, Seen In Scans |
+| Historial | Finding Key, Is Latest Scan For Asset, First Seen, Last Seen, Seen In Scans |
 
 Los campos de la API que no aparecen arriba se incluyen como columnas `Scan: <campo>` o `Finding: <campo>`.
 
@@ -234,9 +167,39 @@ sin escribir nada; usa CSV en ese caso.
 | --- | --- |
 | 0 | Completado |
 | 1 | Incompleto: fallaron algunas peticiones (aparecen en el resumen), o el archivo de salida estaba bloqueado |
-| 2 | Argumentos incorrectos, `mitigations.yml` no válido, o solicitud de mitigación no válida |
-| 3 | `--approve-issue`: quien añadió la etiqueta no está en `MITIGATION_APPROVERS` |
+| 2 | Argumentos incorrectos |
 | 130 | Interrumpido |
+
+## API de librería
+
+Otros scripts pueden importar el archivo en lugar de ejecutarlo. Los nombres admitidos son los de `__all__`;
+`__version__` es la versión publicada.
+
+```python
+import veracode_iac_extract as vx
+
+scans, rows, failures = vx.collect_latest(asset="my-org/*", scan_type="iac")
+```
+
+```python
+collect_latest(base_url=None, link_base=None, *, asset=None, exclude_asset=None, scan_type=None,
+               asset_type=None, scanned_by=None, policy=None, since=None, until=None, workers=4, rps=2.0,
+               max_attempts=6, timeout=90, ca_cert=None, minter=None, now=None, log=print)
+```
+
+Lee todos los hallazgos del último escaneo de cada asset que pasa los filtros de escaneo. Los argumentos de filtro
+aceptan los mismos valores que los flags (un patrón o una lista de patrones). No se omite ningún escaneo y no se
+escribe nada.
+
+| Devuelve | Contenido |
+| --- | --- |
+| `scans` | Una fila por escaneo del tenant, con las columnas de escaneo de la exportación. `"_read": True` en los escaneos cuyos hallazgos se leyeron completos |
+| `rows` | Una fila por hallazgo de esos escaneos, con las columnas de la exportación (Code Lines incluida) |
+| `failures` | `(scope, detail)` de cada petición fallida. Si no está vacío, los datos están incompletos |
+
+Lanza `ExtractError`: `exit_code` 2 si la entrada es incorrecta, 1 si no se puede leer el token o la lista de
+escaneos. `base_url` y `link_base` salen de la región de las credenciales si no se indican (obligatorios en
+FedRAMP).
 
 ## Solución de problemas
 
@@ -250,4 +213,4 @@ sin escribir nada; usa CSV en ese caso.
 
 ## Documentación relacionada
 
-- [MITIGATIONS.es.md](MITIGATIONS.md): solicitar, aprobar, editar y revocar mitigaciones; campos de `mitigations.yml`
+- [Veracode-IaC-Mitigation-Tracker](https://github.com/ancient-cthulhu/Veracode-IaC-Mitigation-Tracker): seguimiento de hallazgos con mitigaciones, basado en este script
