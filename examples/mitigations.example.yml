@@ -1,0 +1,32 @@
+# Example mitigations.yml. See MITIGATIONS.md for every field.
+
+# Recorded by the approval workflow from issue #12: one finding, exact scope.
+- id: M-0001
+  finding: "mk-0540251fd6ff"
+  asset: "acme/payments-infra"
+  type: accept-risk
+  reason: "Bucket serves the public status page through CloudFront"
+  approved_by: "lead-dev"
+  approved_on: 2026-11-15
+  expires: 2027-11-09
+  ref: "https://github.com/acme/veracode-findings/issues/12"
+  requested_by: "dev1"
+  notes: "CHG-4411"
+
+# Added in a pull request: a rule ID on every sandbox repo.
+- id: M-0002
+  finding: AVD-AWS-0089
+  asset: acme/sandbox-*
+  type: by-design
+  reason: Sandbox accounts are rebuilt every night; S3 access logging is not needed there
+  approved_by: security@acme.com
+  approved_on: 2026-11-15
+
+# A test fixture key in one folder, on every asset.
+- id: M-0003
+  finding: aws-access-token
+  file: tests/fixtures/*
+  type: false-positive
+  reason: AWS documentation example key (AKIAIOSFODNN7EXAMPLE) in test fixtures
+  approved_by: security@acme.com
+  approved_on: 2026-11-15
