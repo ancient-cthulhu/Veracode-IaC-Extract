@@ -1,9 +1,9 @@
 # Mitigations
 
-English | [Español](MITIGATIONS.es.md)
+English | [Español](es/MITIGATIONS.md)
 
 The Veracode Platform has no mitigations for Container, IaC and Secrets findings. The
-[findings tracker](README.md#findings-tracker-recommended) records them in `mitigations.yml` and shows them in
+[findings tracker](../README.md#findings-tracker-recommended) records them in `mitigations.yml` and shows them in
 `FINDINGS.md`, `tracking/findings.csv` and every export.
 
 ## Request and approve
@@ -58,7 +58,7 @@ The Veracode Platform has no mitigations for Container, IaC and Secrets findings
 | `allow_broad` | No | `true` to allow a rule that matches every finding |
 
 If several rules match, the first unexpired one in the file wins. More examples:
-[examples/mitigations.example.yml](examples/mitigations.example.yml).
+[examples/mitigations.example.yml](../examples/mitigations.example.yml).
 
 | Type | Use when |
 | --- | --- |
@@ -88,7 +88,7 @@ python veracode_iac_extract.py -o findings.csv --mitigations mitigations.yml    
 ## Security
 
 - Only logins in `MITIGATION_APPROVERS` can approve; changing the variable needs admin access.
-- Protect `mitigations.yml` and `.github/` with [CODEOWNERS](.github/CODEOWNERS) and branch protection.
+- Protect `mitigations.yml` and `.github/` with [CODEOWNERS](../.github/CODEOWNERS) and branch protection.
 - Issue text never reaches a shell, and everything shown in comments and `FINDINGS.md` is escaped.
 - The pull request check runs the script from the base branch, so a pull request cannot change its own check.
 

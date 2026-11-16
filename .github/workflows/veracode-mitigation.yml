@@ -6,7 +6,7 @@
 #   Pull request on mitigations.yml  validates the file and comments a table of the rules added, changed or
 #                                    removed, using the checker from the base branch.
 #
-# The issue text never reaches a shell: the script reads it from a JSON file. See MITIGATIONS.md.
+# The issue text never reaches a shell: the script reads it from a JSON file. See docs/MITIGATIONS.md.
 
 name: Veracode mitigations
 
