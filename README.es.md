@@ -8,77 +8,71 @@ de GitHub, con mitigaciones.
 
 ## Seguimiento de hallazgos (recomendado)
 
-Un repositorio privado que guarda el estado de cada hallazgo a lo largo del tiempo, como los hallazgos de
-Static Analysis en la Veracode Platform, y registra las mitigaciones aprobadas. Se ejecuta en GitHub Actions;
-no hay que instalar nada.
+Un repositorio privado de GitHub que sigue cada hallazgo a lo largo del tiempo, como Static Analysis en la
+Veracode Platform, y registra las mitigaciones aprobadas. Se ejecuta en GitHub Actions; no hay que instalar nada.
 
-### Configuración inicial
+### Configuración
 
-1. **Use this template > Create a new repository**, y hazlo privado.
-2. Settings > Secrets and variables > Actions: añade los secretos `VERACODE_API_KEY_ID` y
-   `VERACODE_API_KEY_SECRET`.
-3. En el mismo sitio, añade la variable `MITIGATION_APPROVERS`: los logins de GitHub que pueden aprobar
-   mitigaciones, separados por comas o espacios. Opcional: la variable `VERACODE_TRACK_ARGS` con filtros de
-   escaneo, por ejemplo `--asset my-org/*`.
+1. **Use this template > Create a new repository** (privado).
+2. Settings > Secrets and variables > Actions:
+   - secretos `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`
+   - variable `MITIGATION_APPROVERS`: logins de GitHub que pueden aprobar, por ejemplo `alice bob`
+   - variable opcional `VERACODE_TRACK_ARGS` con filtros de escaneo, por ejemplo `--asset my-org/*`
+3. Actions > **Veracode findings tracker** > **Run workflow** (después se ejecuta cada día a las 05:23 UTC).
 
-La primera ejecución es al día siguiente a las 05:23 UTC, o ahora desde Actions > Veracode findings tracker >
-Run workflow.
+### Cómo funciona
 
-### Qué se ejecuta cada día
+| Cuándo | Qué pasa |
+| --- | --- |
+| Día 1 | La ejecución diaria encuentra `AVD-AWS-0086` en `acme/payments-infra`. Aparece como **New** en `FINDINGS.md` con un enlace **Mitigate** |
+| Día 2 | Sigue en el último escaneo: **Open**. Days Open va sumando |
+| Solicitud | Un desarrollador pulsa **Mitigate**. Se abre una incidencia ya rellenada; elige el tipo, escribe el motivo y una fecha de caducidad |
+| Aprobación | Un aprobador añade la etiqueta `approved`. El bot registra `M-0001` en `mitigations.yml`, marca el hallazgo como **Mitigated**, comenta y cierra la incidencia |
+| Corrección | Otro hallazgo se corrige y su asset se vuelve a escanear. La siguiente ejecución lo pasa a `tracking/fixed.csv` con Fixed On y Days Open |
+| Regresión | Un hallazgo corregido vuelve: **Reopened**, con su First Seen original |
+| Caducidad | 30 días antes de `expires` la mitigación aparece como **Expiring**; después, **Expired** y el hallazgo vuelve a contar como abierto |
 
-[veracode-tracker.yml](.github/workflows/veracode-tracker.yml) lee el último escaneo de cada asset y hace un
-commit `Daily findings: +N new, -M fixed` con:
+Cada cambio es un commit (`Daily findings: +2 new, -1 fixed`), así que el historial de git es la auditoría.
+
+### Archivos
 
 | Archivo | Contenido |
 | --- | --- |
-| `FINDINGS.md` | Panel: totales, hallazgos nuevos, mitigaciones que caducan, hallazgos abiertos, corregidos en los últimos 30 días. Cada hallazgo tiene un enlace Veracode y un enlace Mitigate |
-| `tracking/findings.csv` | Cada hallazgo abierto: estado, severidad, ubicación, First Seen, Days Open, mitigación |
-| `tracking/fixed.csv` | Cada hallazgo corregido, con Fixed On y Days Open |
-| `mitigations.yml` | Mitigaciones aprobadas (consulta [MITIGATIONS.es.md](MITIGATIONS.es.md)) |
+| `FINDINGS.md` | Panel: totales, nuevos, mitigaciones que caducan, abiertos, corregidos en los últimos 30 días. Enlaces a Veracode y Mitigate |
+| `tracking/findings.csv` | Hallazgos abiertos: estado, severidad, ubicación, First Seen, Days Open, mitigación |
+| `tracking/fixed.csv` | Hallazgos corregidos, con Fixed On y Days Open |
+| `mitigations.yml` | Mitigaciones aprobadas. Consulta [MITIGATIONS.es.md](MITIGATIONS.es.md) |
 
-La ejecución también adjunta un informe completo en Excel (artefacto `veracode-findings`, se guarda 30 días;
-sin líneas de código). Si falla alguna petición, no cambia nada y se abre una incidencia con la etiqueta
-`tracker-failure`; se cierra tras la siguiente ejecución correcta. Si la protección de rama rechaza el push, la
-actualización va a la rama `tracking`.
+Cada ejecución adjunta además un informe completo en Excel (artefacto `veracode-findings`, 30 días, sin líneas de
+código).
 
 ### Estados
 
 | Status | Significado |
 | --- | --- |
-| New | Visto por primera vez en esta ejecución. Aparece como Open desde el día siguiente |
-| Open | Sigue presente en el último escaneo |
-| Reopened | Estaba corregido y ha vuelto. Conserva su First Seen original |
-| Asset Missing | El asset ya no existe en Veracode. A los 30 días el hallazgo pasa a `fixed.csv` como `asset-removed` |
-| Fixed | No aparece en un escaneo más reciente de su asset. Se quita de `findings.csv` y se registra en `fixed.csv` |
+| New | Visto por primera vez en esta ejecución. Open desde el día siguiente |
+| Open | Está en el último escaneo de su asset |
+| Reopened | Estaba corregido y ha vuelto |
+| Asset Missing | El asset ya no está en Veracode. A los 30 días pasa a `fixed.csv` como `asset-removed` |
+| Fixed | Ya no está en un escaneo más reciente de su asset. Pasa a `fixed.csv` |
 
-Un hallazgo solo se marca como corregido cuando su asset se ha vuelto a escanear. Los hallazgos de assets
-excluidos por filtros o sin escaneo nuevo se quedan como están.
-
-### Solicitudes de mitigación
-
-1. En `FINDINGS.md`, pulsa **Mitigate** en el hallazgo. GitHub abre una incidencia ya rellenada: elige el tipo,
-   escribe el motivo (y la fecha de caducidad para `accept-risk`) y envíala.
-2. Un aprobador añade la etiqueta `approved`.
-3. El workflow registra la mitigación en `mitigations.yml` (`M-0001`, `M-0002`, ...), actualiza el panel,
-   comenta y cierra la incidencia. Si la solicitud no es válida o la persona no es aprobadora, comenta el motivo
-   y quita la etiqueta.
-
-Mitigation Status: `Mitigated`, `Expiring` (quedan 30 días o menos), `Expired` (vuelve a contar como abierto), o
-vacío. Detalles, editar `mitigations.yml` directamente y revocar: [MITIGATIONS.es.md](MITIGATIONS.es.md).
+Un hallazgo solo se marca como corregido cuando su asset se ha vuelto a escanear. Si falla alguna petición, la
+ejecución no cambia nada y abre una incidencia con la etiqueta `tracker-failure` (se cierra con la siguiente
+ejecución correcta). Si la protección de rama rechaza el push, la actualización va a la rama `tracking`.
 
 ### Flags del seguimiento
 
 | Flag | Efecto |
 | --- | --- |
-| `--track DIR` | Actualiza `DIR/findings.csv`, `DIR/fixed.csv` y el panel con el último escaneo de cada asset. Se aplican los filtros de escaneo; los de hallazgo se rechazan. Si falla cualquier petición no cambia nada (código 1) |
-| `--offline` | Con `--track`: actualiza Days Open, las columnas Mitigation y el panel sin llamar a Veracode |
+| `--track DIR` | Actualiza `DIR/findings.csv`, `DIR/fixed.csv` y el panel. Se aplican los filtros de escaneo; los de hallazgo se rechazan |
+| `--offline` | Con `--track`: actualiza Days Open, las mitigaciones y el panel sin llamar a Veracode |
 | `--mitigations ARCHIVO` | El archivo de reglas, `mitigations.yml` |
 | `--dashboard ARCHIVO` | Ruta del panel (por defecto `FINDINGS.md` junto a `DIR`) |
-| `--repo-url URL` | `https://github.com/<org>/<repo>` para los enlaces Mitigate. En GitHub Actions se detecta solo |
-| `--migrate CSV_ANTIGUO` | Copia las mitigaciones de un CSV de seguimiento antiguo a `mitigations.yml`. Automático en la primera ejecución si `veracode-findings.csv` está junto a `DIR` |
-| `-o ARCHIVO` | Con `--track`: escribe además cada hallazgo actual con todas las columnas, Status y Mitigation (sin Code Lines) |
+| `--repo-url URL` | `https://github.com/<org>/<repo>` para los enlaces Mitigate (se detecta en GitHub Actions) |
+| `--migrate CSV_ANTIGUO` | Importa las mitigaciones de un `veracode-findings.csv` (automático si está junto a `DIR`) |
+| `-o ARCHIVO` | Con `--track`: escribe además cada hallazgo actual con todas las columnas |
 
-Para ejecutarlo en local: `python veracode_iac_extract.py --track tracking --mitigations mitigations.yml`.
+En local: `python veracode_iac_extract.py --track tracking --mitigations mitigations.yml`
 
 ## Requisitos
 

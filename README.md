@@ -7,74 +7,70 @@ one row per finding, with filters. It also runs a findings tracker in a GitHub r
 
 ## Findings tracker (recommended)
 
-A private repository that keeps the state of every finding over time, like Static Analysis findings on the
-Veracode Platform, and records approved mitigations. It runs in GitHub Actions; nothing to install.
+A private GitHub repository that follows every finding over time, like Static Analysis on the Veracode
+Platform, and records approved mitigations. It runs in GitHub Actions; nothing to install.
 
 ### Setup
 
-1. **Use this template > Create a new repository**, and make it private.
-2. Settings > Secrets and variables > Actions: add the secrets `VERACODE_API_KEY_ID` and
-   `VERACODE_API_KEY_SECRET`.
-3. In the same place, add the variable `MITIGATION_APPROVERS`: the GitHub logins that can approve mitigations,
-   comma or space separated. Optional: the variable `VERACODE_TRACK_ARGS` with scan filters, for example
-   `--asset my-org/*`.
+1. **Use this template > Create a new repository** (private).
+2. Settings > Secrets and variables > Actions:
+   - secrets `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`
+   - variable `MITIGATION_APPROVERS`: GitHub logins allowed to approve, for example `alice bob`
+   - optional variable `VERACODE_TRACK_ARGS` with scan filters, for example `--asset my-org/*`
+3. Actions > **Veracode findings tracker** > **Run workflow** (afterwards it runs daily at 05:23 UTC).
 
-The first run is the next day at 05:23 UTC, or now from Actions > Veracode findings tracker > Run workflow.
+### How it works
 
-### What runs every day
+| When | What happens |
+| --- | --- |
+| Day 1 | The daily run finds `AVD-AWS-0086` in `acme/payments-infra`. It appears as **New** in `FINDINGS.md` with a **Mitigate** link |
+| Day 2 | Still in the latest scan: **Open**. Days Open counts up |
+| Request | A developer clicks **Mitigate**. A pre-filled issue opens; they pick a type, write the reason and an expiry date |
+| Approve | An approver adds the label `approved`. The bot records `M-0001` in `mitigations.yml`, marks the finding **Mitigated**, comments and closes the issue |
+| Fix | Another finding is fixed and its asset is scanned again. The next run moves it to `tracking/fixed.csv` with Fixed On and Days Open |
+| Regression | A fixed finding comes back: **Reopened**, with its original First Seen |
+| Expiry | 30 days before `expires` the mitigation shows as **Expiring**; after it, **Expired** and the finding counts as open again |
 
-[veracode-tracker.yml](.github/workflows/veracode-tracker.yml) reads the latest scan of every asset and commits
-`Daily findings: +N new, -M fixed` with:
+Every change is a commit (`Daily findings: +2 new, -1 fixed`), so the git history is the audit trail.
+
+### Files
 
 | File | Content |
 | --- | --- |
-| `FINDINGS.md` | Dashboard: totals, new findings, expiring mitigations, open findings, fixed in the last 30 days. Each finding has a Veracode link and a Mitigate link |
-| `tracking/findings.csv` | Every open finding: status, severity, location, First Seen, Days Open, mitigation |
-| `tracking/fixed.csv` | Every fixed finding, with Fixed On and Days Open |
-| `mitigations.yml` | Approved mitigations (see [MITIGATIONS.md](MITIGATIONS.md)) |
+| `FINDINGS.md` | Dashboard: totals, new, expiring mitigations, open, fixed in the last 30 days. Veracode and Mitigate links |
+| `tracking/findings.csv` | Open findings: status, severity, location, First Seen, Days Open, mitigation |
+| `tracking/fixed.csv` | Fixed findings, with Fixed On and Days Open |
+| `mitigations.yml` | Approved mitigations. See [MITIGATIONS.md](MITIGATIONS.md) |
 
-The run also attaches a full Excel report (artifact `veracode-findings`, kept 30 days; no code lines). If any
-request fails, nothing changes and an issue labelled `tracker-failure` is opened; it closes after the next
-successful run. If branch protection rejects the push, the update goes to the branch `tracking`.
+Each run also attaches a full Excel report (artifact `veracode-findings`, 30 days, no code lines).
 
 ### Statuses
 
 | Status | Meaning |
 | --- | --- |
-| New | First seen in this run. Shown as Open from the next day |
-| Open | Still present in the latest scan |
-| Reopened | Was fixed and came back. Keeps its original First Seen |
-| Asset Missing | The asset is no longer in Veracode. After 30 days the finding moves to `fixed.csv` as `asset-removed` |
-| Fixed | Missing from a newer scan of its asset. Removed from `findings.csv` and logged in `fixed.csv` |
+| New | First seen in this run. Open from the next day |
+| Open | In the latest scan of its asset |
+| Reopened | Was fixed and came back |
+| Asset Missing | The asset is no longer in Veracode. After 30 days it moves to `fixed.csv` as `asset-removed` |
+| Fixed | Gone from a newer scan of its asset. Moved to `fixed.csv` |
 
-A finding is marked fixed only when its asset was scanned again. Findings of assets that were filtered out or
-not rescanned stay as they are.
-
-### Mitigation requests
-
-1. In `FINDINGS.md`, click **Mitigate** on the finding. GitHub opens a pre-filled issue: pick the type, write the
-   reason (and the expiry date for `accept-risk`), submit.
-2. An approver adds the label `approved`.
-3. The workflow records the mitigation in `mitigations.yml` (`M-0001`, `M-0002`, ...), updates the dashboard,
-   comments and closes the issue. If the request is invalid or the person is not an approver, it comments why
-   and removes the label.
-
-Mitigation Status: `Mitigated`, `Expiring` (30 days or less left), `Expired` (counts as open again), or empty.
-Details, editing `mitigations.yml` directly, and revoking: [MITIGATIONS.md](MITIGATIONS.md).
+A finding is only marked fixed when its asset was scanned again. If any request fails, the run changes nothing
+and opens an issue labelled `tracker-failure` (closed by the next good run). If branch protection rejects the
+push, the update goes to the branch `tracking`.
 
 ### Tracker flags
 
 | Flag | Effect |
 | --- | --- |
-| `--track DIR` | Update `DIR/findings.csv`, `DIR/fixed.csv` and the dashboard from the latest scan of every asset. Scan filters apply; finding filters are refused. Any failed request changes nothing (exit 1) |
-| `--offline` | With `--track`: refresh Days Open, the Mitigation columns and the dashboard without calling Veracode |
+| `--track DIR` | Update `DIR/findings.csv`, `DIR/fixed.csv` and the dashboard. Scan filters apply; finding filters are refused |
+| `--offline` | With `--track`: refresh Days Open, mitigations and the dashboard without calling Veracode |
 | `--mitigations FILE` | The rules file, `mitigations.yml` |
 | `--dashboard FILE` | Dashboard path (default `FINDINGS.md` next to `DIR`) |
-| `--repo-url URL` | `https://github.com/<org>/<repo>` for the Mitigate links. In GitHub Actions it is detected |
-| `--migrate OLD_CSV` | Copy the mitigations of an old tracking CSV into `mitigations.yml`. Automatic on the first run when `veracode-findings.csv` sits next to `DIR` |
-| `-o FILE` | With `--track`: also write every current finding with all columns, Status and Mitigation (no Code Lines) |
+| `--repo-url URL` | `https://github.com/<org>/<repo>` for Mitigate links (detected in GitHub Actions) |
+| `--migrate OLD_CSV` | Import mitigations from a `veracode-findings.csv` tracking file (automatic when it sits next to `DIR`) |
+| `-o FILE` | With `--track`: also write every current finding with all columns |
 
-Run it locally: `python veracode_iac_extract.py --track tracking --mitigations mitigations.yml`.
+Locally: `python veracode_iac_extract.py --track tracking --mitigations mitigations.yml`
 
 ## Requirements
 
